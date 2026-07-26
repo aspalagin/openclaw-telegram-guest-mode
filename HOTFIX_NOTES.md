@@ -4,7 +4,9 @@ Tested baseline: OpenClaw `2026.7.1-2`.
 
 ## Patch inventory and apply order
 
-The layer consists of five guarded transformations across three dist bundles.
+The layer consists of seven guarded transformations across four dist bundles
+(v1.1.0 added per-chat guest session scope, guest prompt-context isolation, an
+honest inbound log line, and a tool-policy deny step in the agent tools bundle).
 Bundles are discovered by stable code signatures, never by file name.
 
 | # | Patch id | Bundle | Purpose |
@@ -75,7 +77,7 @@ to patch when a bundle cannot be uniquely identified or a transformation
 anchor does not match; this is the expected safe outcome on any OpenClaw
 version other than `2026.7.1-2`. Every write is preceded by a per-file backup
 under the backup directory. The checker validates the applied signatures
-independently and exits non-zero when any of the five patches is missing.
+independently and exits non-zero when any of the seven patches is missing.
 Run the checker after every OpenClaw package update.
 
 This repository intentionally omits host-specific production notes, node ids,

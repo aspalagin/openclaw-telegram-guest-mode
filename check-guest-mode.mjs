@@ -122,6 +122,33 @@ const checks = [
       contains("TELEGRAM_GUEST_MODEL_HEADER_RE", "guest model-header strip regex"),
     ],
   },
+  {
+    // v1.1.0 privacy hardening: per-chat guest session scope, prompt-context isolation,
+    // and an honest inbound log line naming the real caller.
+    id: "guest-privacy-hardening",
+    locate: (files) => findOneJs(files, "Telegram bot bundle", [
+      "handleInboundMessageLike",
+      "buildChannelInboundEventContext",
+      "sendTyping",
+    ]),
+    assertions: [
+      contains("`${callerUserId}-at-${chatScope}`", "per-chat guest session scope"),
+      contains("isGroup || isSessionBoundaryMessage || isGuestMessage ? []", "guest prompt-context isolation"),
+      contains("(guest query by ${context.ctxPayload.SenderId", "guest caller named in inbound log"),
+    ],
+  },
+  {
+    // v1.1.0 privacy hardening: delivery/spawn tools denied at policy level in guest runs.
+    id: "guest-deny-delivery-tools",
+    locate: (files) => findOneJs(files, "agent tools policy bundle", [
+      'label: "gateway sender owner-only tools"',
+      "const ownerOnlyCoreToolPolicy = ownerOnlyCoreToolDenylist.length > 0",
+    ]),
+    assertions: [
+      contains('label: "guest session tools.deny"', "guest deny policy step"),
+      contains('options.sessionKey.includes(":guest:")', "guest session gate"),
+    ],
+  },
 ];
 
 function main() {

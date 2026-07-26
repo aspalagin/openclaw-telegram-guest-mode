@@ -111,7 +111,7 @@ OPENCLAW_PACKAGE_ROOT=/usr/lib/node_modules/openclaw \
   node check-guest-mode.mjs
 ```
 
-All five patches are required; the checker exits with code 1 when any
+All seven patches are required; the checker exits with code 1 when any
 signature is missing.
 
 > **This patches the installed dist.** Any OpenClaw update (`npm install`,
@@ -129,6 +129,29 @@ directory, then restart the gateway.
 
 For a full package rollback, reinstall the pinned OpenClaw package version or
 restore your package-level backup.
+
+## Privacy model (v1.1.0)
+
+A guest reply is published **in a chat the bot does not own**, visible to
+everyone in that conversation. Three properties enforce that this cannot leak
+anything beyond the guest exchange itself:
+
+- **Per-chat session scope.** The guest session key is scoped to
+  `<callerId>-at-<chatId>`, so the same caller invoking the bot in two
+  different chats gets two isolated sessions. Without this, context from a
+  conversation with one third party surfaces in a reply published to another.
+- **No operator transcript in guest prompts.** Guest turns skip the private
+  session transcript that normal DM turns include, so the operator's private
+  history can never reach a third-party chat.
+- **Delivery tools denied at policy level.** Guest runs cannot call `message`,
+  `sessions_spawn`, `cron`, `gateway`, or `nodes`. The earlier prompt-only hint
+  was observed being ignored by the model, which then attempted to message an
+  unrelated chat.
+
+Diagnostics note: for guest updates the inbound log line prints the id of the
+**chat where the query was typed** in the `from` field — not the sender. The
+line now names the real caller explicitly (`(guest query by <id>)`); reading
+the chat id as the sender has already caused one misdiagnosis.
 
 ## Known limitations
 
