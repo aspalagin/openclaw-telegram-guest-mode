@@ -143,7 +143,11 @@ function resolveTelegramGuestSessionKey(baseSessionKey, msg) {
 \tif (!guestQueryId) return baseSessionKey;
 \tconst callerChatId = msg.guest_bot_caller_chat?.id != null ? String(msg.guest_bot_caller_chat.id) : "";
 \tconst callerUserId = msg.guest_bot_caller_user?.id != null ? String(msg.guest_bot_caller_user.id) : msg.from?.id != null ? String(msg.from.id) : "";
-\tconst scope = callerChatId || callerUserId || guestQueryId;
+\t// Scope = caller + chat: a caller's guest queries in different chats MUST NOT share a
+\t// session, otherwise context from a conversation with one third party leaks into a reply
+\t// published in a chat with another (guest replies are visible to everyone in that chat).
+\tconst chatScope = msg.chat?.id != null ? String(msg.chat.id) : callerChatId;
+\tconst scope = callerUserId && chatScope ? \`\${callerUserId}-at-\${chatScope}\` : chatScope || callerUserId || guestQueryId;
 \treturn \`\${baseSessionKey}:guest:\${normalizeTelegramGuestSessionScope(scope)}\`;
 }
 `,
@@ -331,7 +335,59 @@ function resolveTelegramGuestSessionKey(baseSessionKey, msg) {
       "Telegram guest durable suppression",
     );
   }
+  // Privacy hardening (v1.1.0): a guest reply is published in a chat the bot does not own,
+  // so the prompt must never carry the operator's private session transcript.
+  if (!next.includes("isGuestMessage")) {
+    next = replaceOnce(
+      next,
+      `\t\tconst sessionPromptMessages = isGroup || isSessionBoundaryMessage ? [] : await buildTelegramSessionTranscriptPromptMessages({`,
+      `\t\tconst isGuestMessage = typeof msg.guest_query_id === "string" && msg.guest_query_id.trim().length > 0;
+\t\tconst sessionPromptMessages = isGroup || isSessionBoundaryMessage || isGuestMessage ? [] : await buildTelegramSessionTranscriptPromptMessages({`,
+      "Telegram guest prompt-context isolation",
+    );
+  }
+  // Diagnostics (v1.1.0): for guest updates the inbound log line prints the CHAT id in the
+  // "from" field (the chat where the query was typed), which reads as the sender and has
+  // already caused one misdiagnosis. Name the real caller explicitly.
+  if (!next.includes("(guest query by ")) {
+    next = replaceOnce(
+      next,
+      `telegramInboundLog.info(formatTelegramInboundLogLine({\n\t\t\tfrom: context.ctxPayload.From,`,
+      `telegramInboundLog.info(formatTelegramInboundLogLine({\n\t\t\tfrom: context.ctxPayload.GuestQueryId ? \`\${context.ctxPayload.From} (guest query by \${context.ctxPayload.SenderId ?? "unknown"})\` : context.ctxPayload.From,`,
+      "Telegram guest inbound log caller",
+    );
+  }
   return next;
+}
+
+// Privacy hardening (v1.1.0): the guest prompt only ASKS the model not to use delivery tools.
+// A guest run must not be able to message arbitrary chats or spawn sub-agents, so deny those
+// tools at the policy level for any session key scoped as ":guest:".
+function patchAgentToolsGuestDeny(source) {
+  if (source.includes("guest session tools.deny")) return source;
+  const replaceOnce = (src, before, after, label) => {
+    const index = src.indexOf(before);
+    if (index === -1) throw new Error(`missing ${label}`);
+    if (src.indexOf(before, index + before.length) !== -1) throw new Error(`ambiguous ${label}`);
+    return `${src.slice(0, index)}${after}${src.slice(index + before.length)}`;
+  };
+  return replaceOnce(
+    source,
+    `\t\t\t{\n\t\t\t\tpolicy: ownerOnlyCoreToolPolicy,\n\t\t\t\tlabel: "gateway sender owner-only tools",\n\t\t\t\tunavailableCoreToolReason\n\t\t\t},`,
+    [
+      "\t\t\t{",
+      "\t\t\t\tpolicy: ownerOnlyCoreToolPolicy,",
+      '\t\t\t\tlabel: "gateway sender owner-only tools",',
+      "\t\t\t\tunavailableCoreToolReason",
+      "\t\t\t},",
+      '\t\t\t...(typeof options?.sessionKey === "string" && options.sessionKey.includes(":guest:") ? [{',
+      '\t\t\t\tpolicy: { deny: ["message", "sessions_spawn", "cron", "gateway", "nodes"] },',
+      '\t\t\t\tlabel: "guest session tools.deny",',
+      "\t\t\t\tunavailableCoreToolReason",
+      "\t\t\t}] : []),",
+    ].join("\n"),
+    "agent tools guest deny step",
+  );
 }
 
 function patchDelivery(source) {
@@ -583,6 +639,7 @@ function main() {
     allowed: findOne(files, "Telegram allowed updates bundle", ["DEFAULT_TELEGRAM_UPDATE_TYPES", "message_reaction", "channel_post"]),
     bot: findOne(files, "Telegram bot bundle", ['bot.on("message"', "handleInboundMessageLike", "dispatchTelegramMessage"]),
     delivery: findOne(files, "Telegram delivery bundle", ["async function sendTelegramText", "async function deliverTextReply", "deliverMediaReply"]),
+    agentTools: findOne(files, "agent tools policy bundle", ['label: "gateway sender owner-only tools"', "const ownerOnlyCoreToolPolicy = ownerOnlyCoreToolDenylist.length > 0"]),
   };
   // Apply order is load-bearing: guest-plain-bot-hint rewrites the delivery
   // hint text inserted by telegram-guest-mode-bot, and
@@ -594,6 +651,7 @@ function main() {
     applyFile(targets.delivery, "telegram-guest-mode-delivery", patchDelivery),
     applyFile(targets.bot, "guest-plain-bot-hint", patchGuestPlainBotHint),
     applyFile(targets.delivery, "guest-plain-delivery-normalize", patchGuestPlainDelivery),
+    applyFile(targets.agentTools, "guest-deny-delivery-tools", patchAgentToolsGuestDeny),
   ];
   const changed = results.filter((result) => result.changed).length;
   console.log(`[openclaw-guest-mode] complete changed=${changed} packageRoot=${packageRoot}`);
