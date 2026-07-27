@@ -149,6 +149,36 @@ const checks = [
       contains('options.sessionKey.includes(":guest:")', "guest session gate"),
     ],
   },
+  {
+    // v1.1.1: verbose extras (new-session banner / auto-compaction notice /
+    // trailing plugin-status payload) are suppressed for guest sessions —
+    // multiple payloads broke the one-shot answerGuestQuery.
+    id: "guest-suppress-verbose-payloads",
+    locate: (files) => findOneJs(files, "agent runner runtime bundle", [
+      "function buildPendingFinalDeliveryText",
+      "pendingFinalDeliveryContext",
+      "resolveReplyRunDeliveryContext",
+    ]),
+    assertions: [
+      contains("hotfix: guest-suppress-verbose-payloads", "guest verbose suppression marker"),
+      contains("if (verboseEnabled && !isGuestReplySession && activeIsNewSession)", "new-session banner gated"),
+      contains("const shouldAppendTracePayload = (verboseEnabled || traceEnabledForSender) && !isGuestReplySession;", "trailing status payload gated"),
+    ],
+  },
+  {
+    // v1.1.1: guest replies are inline-or-dropped; the sendMessage fallback
+    // leaked replies into the operator's DM with the bot.
+    id: "guest-single-answer-guard",
+    locate: (files) => findOneJs(files, "Telegram delivery bundle", [
+      "deliverTextReply",
+      "sendChunkedTelegramReplyText",
+      "formatErrorMessage",
+    ]),
+    assertions: [
+      contains("hotfix: guest-single-answer-guard", "single-answer marker"),
+      contains("[hotfix][guest-single-answer]", "diagnostic log tag"),
+    ],
+  },
 ];
 
 function main() {

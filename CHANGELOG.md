@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.1 - 2026-07-27
+
+Multi-payload delivery fix after a production incident (the first guest query
+after a session reset, with verbose enabled, produced two reply payloads: the
+"🧭 New session" banner consumed the one-shot answerGuestQuery, and the real
+reply fell back to sendMessage into the operator's DM with the bot):
+
+- Verbose extras (new-session banner, auto-compaction notice, trailing
+  plugin-status payload) are suppressed for `:guest:`-scoped sessions — a
+  guest reply is always a single plain-text payload
+  (`guest-suppress-verbose-payloads`, patches a fifth bundle: the agent
+  runner runtime).
+- Guest replies are now inline-or-dropped: when `answerGuestQuery` reports the
+  query as expired, the payload is dropped with a
+  `[hotfix][guest-single-answer]` log line instead of falling back to
+  `sendMessage` — the fallback delivered guest replies into the operator's DM
+  (`guest-single-answer-guard`). This changes the documented v1.0.0
+  "expired queries degrade gracefully" behaviour in favour of privacy.
+
 ## v1.1.0 - 2026-07-26
 
 Privacy hardening after a production review of guest traffic (11 guest events
