@@ -49,13 +49,20 @@ portable dist patch layer pinned to one OpenClaw version at a time.
   direct Bot API HTTP call. The last step matters for self-hosted
   `telegram-bot-api` servers whose client bindings do not expose the method
   yet; it uses the bot token from delivery options and never logs it.
-- **Expired queries degrade gracefully.** When Telegram reports the guest
-  query as expired or invalid, delivery falls back to the normal
-  `sendMessage` path instead of failing the run.
+- **Inline-or-dropped.** When Telegram reports the guest query as expired or
+  invalid, the payload is dropped with a `[hotfix][guest-single-answer]` log
+  line. There is deliberately no `sendMessage` fallback (changed in v1.1.1):
+  the fallback chat id is the chat the query was typed in, which for private
+  chats resolves to the operator's DM with the bot — a privacy leak.
 - **At-most-once delivery.** A `guestAnswered` progress flag guards against
   duplicate answers, and durable replay is deliberately disabled for guest
   deliveries: guest queries are short-lived, so replaying one after a restart
   would answer into the void or double-send.
+- **Single payload even in verbose mode.** Session-service extras that the
+  runtime normally emits as separate payloads (the "🧭 New session" banner,
+  the auto-compaction notice, the trailing plugin-status payload) are
+  suppressed for `:guest:`-scoped sessions, so the one-shot `answerGuestQuery`
+  always carries the actual reply (added in v1.1.1).
 - **Reduced surface.** No streaming, no typing or voice cues, no reactions,
   and no media for guests. Media-only replies produce a plain-text
   placeholder.

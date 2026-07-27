@@ -628,6 +628,56 @@ function normalizeTelegramGuestPlainText(text) {
   return next;
 }
 
+// guest-suppress-verbose-payloads (v1.1.1): with verbose enabled (e.g.
+// agents.defaults.verboseDefault=on) the first reply of a fresh guest session
+// gained a SEPARATE "🧭 New session: <id>" payload (likewise the
+// auto-compaction notice and the trailing plugin-status payload). Multiple
+// payloads break the one-shot answerGuestQuery: the banner consumed the inline
+// answer and the real reply fell back to sendMessage into the operator's DM.
+// Guest replies are always a single plain-text payload: verbose extras are
+// suppressed for ":guest:"-scoped sessions.
+function patchGuestSuppressVerbosePayloads(source) {
+  if (source.includes("hotfix: guest-suppress-verbose-payloads")) return source;
+  let next = replaceOnce(
+    source,
+    "\t\tconst prefixNotices = [];\n\t\tif (verboseEnabled && activeIsNewSession) prefixNotices.push({ text: `🧭 New session: ${followupRun.run.sessionId}` });",
+    "\t\t//#region hotfix: guest-suppress-verbose-payloads (v1.1.1)\n\t\tconst isGuestReplySession = typeof sessionKey === \"string\" && sessionKey.includes(\":guest:\");\n\t\t//#endregion\n\t\tconst prefixNotices = [];\n\t\tif (verboseEnabled && !isGuestReplySession && activeIsNewSession) prefixNotices.push({ text: `🧭 New session: ${followupRun.run.sessionId}` });",
+    "guest-suppress-verbose new-session banner",
+  );
+  next = replaceOnce(
+    next,
+    "\t\t\tif (verboseEnabled) {\n\t\t\t\tconst suffix = typeof count === \"number\" ? ` (count ${count})` : \"\";\n\t\t\t\tprefixNotices.push({ text: `🧹 Auto-compaction complete${suffix}.` });",
+    "\t\t\tif (verboseEnabled && !isGuestReplySession) {\n\t\t\t\tconst suffix = typeof count === \"number\" ? ` (count ${count})` : \"\";\n\t\t\t\tprefixNotices.push({ text: `🧹 Auto-compaction complete${suffix}.` });",
+    "guest-suppress-verbose auto-compaction notice",
+  );
+  next = replaceOnce(
+    next,
+    "const shouldAppendTracePayload = verboseEnabled || traceEnabledForSender;",
+    "const shouldAppendTracePayload = (verboseEnabled || traceEnabledForSender) && !isGuestReplySession;",
+    "guest-suppress-verbose trailing status payload",
+  );
+  return next;
+}
+
+// guest-single-answer-guard (v1.1.1): answerGuestQuery is one-shot, but reply
+// payloads are delivered with independent progress objects, so the
+// progress.guestAnswered guard does not carry across payloads. A second
+// payload got "query is too old" and fell back to sendMessage into
+// params.chatId — for private chats that is the operator's DM with the bot
+// (privacy leak). Guest replies are now inline-or-dropped (with a log line);
+// the sendMessage fallback is removed.
+// Cascade: the anchor is inserted by telegram-guest-mode-delivery +
+// guest-plain-delivery-normalize; apply those first.
+function patchGuestSingleAnswerGuard(source) {
+  if (source.includes("hotfix: guest-single-answer-guard")) return source;
+  return replaceOnce(
+    source,
+    "\t\t} catch (err) {\n\t\t\tif (!isTelegramGuestQueryExpiredError(err)) throw err;\n\t\t\tparams.runtime.log?.(`telegram guest query expired; falling back to sendMessage: ${formatErrorMessage(err)}`);\n\t\t}\n\t\tif (firstDeliveredMessageId != null) {\n\t\t\tparams.progress.guestAnswered = true;\n\t\t\tparams.progress.hasDelivered = true;\n\t\t\tparams.progress.deliveredCount += 1;\n\t\t\treturn firstDeliveredMessageId;\n\t\t}\n\t}",
+    "\t\t} catch (err) {\n\t\t\tif (!isTelegramGuestQueryExpiredError(err)) throw err;\n\t\t\t//#region hotfix: guest-single-answer-guard (v1.1.1)\n\t\t\tparams.runtime.log?.(`[hotfix][guest-single-answer] guest query expired; dropping payload without sendMessage fallback: ${formatErrorMessage(err)}`);\n\t\t\treturn;\n\t\t\t//#endregion\n\t\t}\n\t\tif (firstDeliveredMessageId != null) {\n\t\t\tparams.progress.guestAnswered = true;\n\t\t\tparams.progress.hasDelivered = true;\n\t\t\tparams.progress.deliveredCount += 1;\n\t\t\treturn firstDeliveredMessageId;\n\t\t}\n\t\t//#region hotfix: guest-single-answer-guard (v1.1.1): guest reply must never fall back to sendMessage\n\t\tparams.runtime.log?.(\"[hotfix][guest-single-answer] inline answer returned no message id; suppressing sendMessage fallback\");\n\t\treturn;\n\t\t//#endregion\n\t}",
+    "guest-single-answer-guard delivery block",
+  );
+}
+
 function main() {
   if (!fs.existsSync(distDir)) throw new Error(`dist directory does not exist: ${distDir}`);
   const pkg = JSON.parse(read(path.join(packageRoot, "package.json")));
@@ -640,6 +690,7 @@ function main() {
     bot: findOne(files, "Telegram bot bundle", ['bot.on("message"', "handleInboundMessageLike", "dispatchTelegramMessage"]),
     delivery: findOne(files, "Telegram delivery bundle", ["async function sendTelegramText", "async function deliverTextReply", "deliverMediaReply"]),
     agentTools: findOne(files, "agent tools policy bundle", ['label: "gateway sender owner-only tools"', "const ownerOnlyCoreToolPolicy = ownerOnlyCoreToolDenylist.length > 0"]),
+    agentRunner: findOne(files, "agent runner runtime bundle", ["function buildPendingFinalDeliveryText", "pendingFinalDeliveryContext", "resolveReplyRunDeliveryContext"]),
   };
   // Apply order is load-bearing: guest-plain-bot-hint rewrites the delivery
   // hint text inserted by telegram-guest-mode-bot, and
@@ -652,6 +703,8 @@ function main() {
     applyFile(targets.bot, "guest-plain-bot-hint", patchGuestPlainBotHint),
     applyFile(targets.delivery, "guest-plain-delivery-normalize", patchGuestPlainDelivery),
     applyFile(targets.agentTools, "guest-deny-delivery-tools", patchAgentToolsGuestDeny),
+    applyFile(targets.agentRunner, "guest-suppress-verbose-payloads", patchGuestSuppressVerbosePayloads),
+    applyFile(targets.delivery, "guest-single-answer-guard", patchGuestSingleAnswerGuard),
   ];
   const changed = results.filter((result) => result.changed).length;
   console.log(`[openclaw-guest-mode] complete changed=${changed} packageRoot=${packageRoot}`);
