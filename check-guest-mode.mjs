@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Signature checker for the OpenClaw Telegram Guest Mode patch layer
-// (apply-guest-mode.mjs). All five patches are required: any missing
-// signature fails the run with exit code 1. Run this after applying the
-// patches and after every OpenClaw package update.
+// (apply-guest-mode.mjs). Every patch is required: any missing signature
+// fails the run with exit code 1. Run this after applying the patches and
+// after every OpenClaw package update.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -177,6 +177,37 @@ const checks = [
     assertions: [
       contains("hotfix: guest-single-answer-guard", "single-answer marker"),
       contains("[hotfix][guest-single-answer]", "diagnostic log tag"),
+    ],
+  },
+  {
+    // v1.1.2: in-run verbose progress (commentary / tool progress) is disabled for
+    // guest sessions — with verbose enabled it consumed the one-shot answerGuestQuery
+    // on any run that called a tool, so the guest got a progress line, not an answer.
+    id: "guest-suppress-inrun-progress",
+    locate: (files) => findOneJs(files, "auto-reply dispatch bundle", [
+      "async function clearPendingFinalDeliveryAfterSuccess",
+      "const replies = replyResult ? Array.isArray(replyResult) ? replyResult : [replyResult] : []",
+    ]),
+    assertions: [
+      contains("hotfix: guest-suppress-inrun-progress", "in-run progress suppression marker"),
+      contains('const isGuestDispatchSession = typeof acpDispatchSessionKey === "string" && acpDispatchSessionKey.includes(":guest:");', "guest dispatch flag"),
+      contains("const shouldEmitVerboseProgress = isGuestDispatchSession ? () => false : verboseProgress.shouldEmit;", "verbose progress gated for guest"),
+      contains("const shouldEmitFullVerboseProgress = isGuestDispatchSession ? () => false : verboseProgress.shouldEmitFull;", "full verbose progress gated for guest"),
+    ],
+  },
+  {
+    // v1.1.2: a guest-session payload with no guestQueryId is never delivered as a plain
+    // message into the chat the query was typed in (observed bypass via richMessage).
+    id: "guest-no-chat-fallback",
+    locate: (files) => findOneJs(files, "Telegram delivery bundle", [
+      "deliverTextReply",
+      "sendChunkedTelegramReplyText",
+      "formatErrorMessage",
+    ]),
+    assertions: [
+      contains("hotfix: guest-no-chat-fallback", "guest chat-fallback guard marker"),
+      contains("[hotfix][guest-no-chat-fallback]", "diagnostic log tag"),
+      contains('if (!params.guestQueryId && typeof params.sessionKeyForInternalHooks === "string" && params.sessionKeyForInternalHooks.includes(":guest:")) {', "guard condition"),
     ],
   },
 ];

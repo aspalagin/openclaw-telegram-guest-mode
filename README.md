@@ -62,7 +62,16 @@ portable dist patch layer pinned to one OpenClaw version at a time.
   runtime normally emits as separate payloads (the "🧭 New session" banner,
   the auto-compaction notice, the trailing plugin-status payload) are
   suppressed for `:guest:`-scoped sessions, so the one-shot `answerGuestQuery`
-  always carries the actual reply (added in v1.1.1).
+  always carries the actual reply (added in v1.1.1). In-run progress —
+  commentary, tool progress, tool summaries — is suppressed for the same
+  sessions (added in v1.1.2): because guests get no streaming draft, that
+  progress would otherwise be emitted as standalone payloads and the first one
+  would consume the inline answer on every run that calls a tool.
+- **No delivery outside the guest query.** A payload belonging to a guest
+  session that carries no guest query id is dropped with a
+  `[hotfix][guest-no-chat-fallback]` log line rather than sent as a plain
+  message into the chat the query was typed in (added in v1.1.2, after such a
+  bypass was observed through the rich-message path).
 - **Reduced surface.** No streaming, no typing or voice cues, no reactions,
   and no media for guests. Media-only replies produce a plain-text
   placeholder.
@@ -118,8 +127,8 @@ OPENCLAW_PACKAGE_ROOT=/usr/lib/node_modules/openclaw \
   node check-guest-mode.mjs
 ```
 
-All seven patches are required; the checker exits with code 1 when any
-signature is missing.
+All ten patches are required; the checker validates them with eleven
+signature checks and exits with code 1 when any check fails.
 
 > **This patches the installed dist.** Any OpenClaw update (`npm install`,
 > version upgrade, or reinstall) reverts the patched bundles. Re-run the apply
