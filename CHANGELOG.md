@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.1.2 - 2026-07-29
+
+Completes the multi-payload fix started in v1.1.1, which suppressed only
+POST-RUN verbose extras. With verbose enabled, guest runs that called a tool
+still emitted IN-RUN progress payloads, and the first one consumed the one-shot
+`answerGuestQuery` — the guest saw a progress line where the answer should
+have been, and the answer itself was dropped tens of seconds later as an
+expired query. Runs without tools were unaffected, which made the bug look
+intermittent (production, 2026-07-29: 5 of 11 guest runs, all five with a
+web-search call).
+
+- In-run verbose progress (commentary, tool progress, tool summaries) is
+  disabled for `:guest:`-scoped sessions in a single place
+  (`guest-suppress-inrun-progress`, patches a sixth bundle: the auto-reply
+  dispatch bundle). Root cause: guest queries have streaming draft delivery
+  disabled, so progress is emitted as standalone payloads rather than draft
+  edits.
+- A payload belonging to a guest session that carries no `guestQueryId` is
+  dropped with a `[hotfix][guest-no-chat-fallback]` log line instead of being
+  delivered as a plain message into the chat the query was typed in
+  (`guest-no-chat-fallback`). This closes a bypass of the v1.1.1 guard through
+  the rich-message delivery path, observed in production and stopped only by
+  Telegram's "bot can't initiate conversation with a user" error.
+- Checker covers both new signatures (eleven checks in total).
+
+Diagnostic note for this class of bug: a guest run whose answer reached the
+guest leaves a `channel-final` delivery mirror in the session transcript. No
+mirror means the answer never arrived, whatever the logs show as delivered.
+
 ## v1.1.1 - 2026-07-27
 
 Multi-payload delivery fix after a production incident (the first guest query

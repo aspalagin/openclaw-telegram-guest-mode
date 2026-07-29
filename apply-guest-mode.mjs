@@ -678,6 +678,60 @@ function patchGuestSingleAnswerGuard(source) {
   );
 }
 
+// guest-suppress-inrun-progress (v1.1.2): v1.1.1 suppressed only POST-RUN verbose extras.
+// With verbose enabled, any guest run that calls a tool also produced IN-RUN progress
+// payloads: streaming draft delivery is disabled for guest queries
+// (`streamDeliveryEnabled = ... && !isGuestQuery && ...`), so commentary and tool progress
+// are emitted as standalone messages (`deliverStandaloneCommentaryProgress`) instead of
+// draft edits. The first such payload consumed the one-shot answerGuestQuery, and the real
+// reply — arriving tens of seconds later — got "query is too old" and was dropped by
+// guest-single-answer-guard: the guest saw a progress line instead of an answer.
+// Observed in production on 2026-07-29: 5 of 11 guest runs, every one of them a run that
+// called a web-search tool; runs without tools were unaffected, which made the bug look
+// intermittent. Fix: verbose progress is disabled entirely for ":guest:"-scoped sessions,
+// in one place.
+function patchGuestSuppressInrunProgress(source) {
+  if (source.includes("hotfix: guest-suppress-inrun-progress")) return source;
+  return replaceOnce(
+    source,
+    "\tconst shouldEmitVerboseProgress = verboseProgress.shouldEmit;\n\tconst shouldEmitFullVerboseProgress = verboseProgress.shouldEmitFull;",
+    [
+      "\t//#region hotfix: guest-suppress-inrun-progress (v1.1.2)",
+      "\tconst isGuestDispatchSession = typeof acpDispatchSessionKey === \"string\" && acpDispatchSessionKey.includes(\":guest:\");",
+      "\tconst shouldEmitVerboseProgress = isGuestDispatchSession ? () => false : verboseProgress.shouldEmit;",
+      "\tconst shouldEmitFullVerboseProgress = isGuestDispatchSession ? () => false : verboseProgress.shouldEmitFull;",
+      "\t//#endregion",
+    ].join("\n"),
+    "guest-suppress-inrun-progress verbose gate",
+  );
+}
+
+// guest-no-chat-fallback (v1.1.2): the only legitimate transport for a guest reply is
+// answerGuestQuery. Observed in production on 2026-07-29: a guest-session payload was
+// delivered by a plain sendRichMessage into the chat the inline query was typed in,
+// bypassing guest-single-answer-guard entirely — only Telegram's
+// "403: bot can't initiate conversation with a user" prevented the leak. That is the same
+// class of leak v1.1.1 closed for the sendMessage path. Guard: a payload belonging to a
+// ":guest:"-scoped session that carries no guestQueryId is dropped, not delivered.
+function patchGuestNoChatFallback(source) {
+  if (source.includes("hotfix: guest-no-chat-fallback")) return source;
+  return replaceOnce(
+    source,
+    "async function deliverReplies(params) {\n\tconst progress = {",
+    [
+      "async function deliverReplies(params) {",
+      "\t//#region hotfix: guest-no-chat-fallback (v1.1.2)",
+      "\tif (!params.guestQueryId && typeof params.sessionKeyForInternalHooks === \"string\" && params.sessionKeyForInternalHooks.includes(\":guest:\")) {",
+      "\t\tparams.runtime.log?.(`[hotfix][guest-no-chat-fallback] dropping guest-session payload without guest query id (chat=${params.chatId})`);",
+      "\t\treturn { delivered: false };",
+      "\t}",
+      "\t//#endregion",
+      "\tconst progress = {",
+    ].join("\n"),
+    "guest-no-chat-fallback delivery guard",
+  );
+}
+
 function main() {
   if (!fs.existsSync(distDir)) throw new Error(`dist directory does not exist: ${distDir}`);
   const pkg = JSON.parse(read(path.join(packageRoot, "package.json")));
@@ -691,6 +745,7 @@ function main() {
     delivery: findOne(files, "Telegram delivery bundle", ["async function sendTelegramText", "async function deliverTextReply", "deliverMediaReply"]),
     agentTools: findOne(files, "agent tools policy bundle", ['label: "gateway sender owner-only tools"', "const ownerOnlyCoreToolPolicy = ownerOnlyCoreToolDenylist.length > 0"]),
     agentRunner: findOne(files, "agent runner runtime bundle", ["function buildPendingFinalDeliveryText", "pendingFinalDeliveryContext", "resolveReplyRunDeliveryContext"]),
+    dispatch: findOne(files, "auto-reply dispatch bundle", ["async function clearPendingFinalDeliveryAfterSuccess", "const replies = replyResult ? Array.isArray(replyResult) ? replyResult : [replyResult] : []"]),
   };
   // Apply order is load-bearing: guest-plain-bot-hint rewrites the delivery
   // hint text inserted by telegram-guest-mode-bot, and
@@ -705,6 +760,8 @@ function main() {
     applyFile(targets.agentTools, "guest-deny-delivery-tools", patchAgentToolsGuestDeny),
     applyFile(targets.agentRunner, "guest-suppress-verbose-payloads", patchGuestSuppressVerbosePayloads),
     applyFile(targets.delivery, "guest-single-answer-guard", patchGuestSingleAnswerGuard),
+    applyFile(targets.dispatch, "guest-suppress-inrun-progress", patchGuestSuppressInrunProgress),
+    applyFile(targets.delivery, "guest-no-chat-fallback", patchGuestNoChatFallback),
   ];
   const changed = results.filter((result) => result.changed).length;
   console.log(`[openclaw-guest-mode] complete changed=${changed} packageRoot=${packageRoot}`);
