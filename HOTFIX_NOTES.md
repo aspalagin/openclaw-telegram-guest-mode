@@ -113,6 +113,17 @@ Diagnostic: a guest turn whose answer reached the guest leaves a
 `channel-final` delivery mirror in the session transcript. No mirror means the
 answer never arrived, regardless of what the delivery logs report.
 
+## Inserted code must not rely on bundle-local imports
+
+Code that the patches insert into a bundle may only use globals and symbols
+the patch itself defines. Bundle-local imports (for example the
+`string-coerce` helpers) change between OpenClaw builds: v1.1.2 relied on
+`normalizeLowercaseStringOrEmpty` being imported by the bot-message bundle,
+and on a build that dropped that import every guest query failed at runtime
+with a `ReferenceError` from the ingress spool retry loop, with the checker
+still green. Neither `node --check` nor the checker catches this class of
+defect; only a live guest query does.
+
 ## Verification mechanism
 
 The apply script discovers each target bundle by code signatures and refuses

@@ -134,7 +134,7 @@ function patchBot(source) {
     next,
     'function createTelegramIngressSubject(senderId) {\n\treturn { stableId: senderId };\n}\n',
     `function normalizeTelegramGuestSessionScope(value) {
-\tconst normalized = normalizeLowercaseStringOrEmpty(value);
+\tconst normalized = String(value ?? "").trim().toLowerCase();
 \tconst safe = normalized.replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
 \treturn safe.slice(0, 96) || "unknown";
 }

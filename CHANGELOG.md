@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.1.3 - 2026-09-19
+
+Portability fix, no behaviour change.
+
+- `normalizeTelegramGuestSessionScope` (inserted into the bot-message bundle
+  by the session-scope patch) called `normalizeLowercaseStringOrEmpty`, a
+  helper the bundle imported from `string-coerce` only in the pinned baseline.
+  Once a newer OpenClaw build stopped importing it (observed on `2026.9.4`),
+  every `guest_message` failed inside the ingress spool with
+  `ReferenceError: normalizeLowercaseStringOrEmpty is not defined` and was
+  retried forever, while the checker stayed green because it validates
+  anchors and markers, not identifier resolution. The helper is now
+  self-contained (`String(value ?? "").trim().toLowerCase()`).
+- Operational note: after re-applying on a fresh build, run one live guest
+  query. A syntax/import-clean bundle is not proof that inserted code links.
+
 ## v1.1.2 - 2026-07-29
 
 Completes the multi-payload fix started in v1.1.1, which suppressed only
