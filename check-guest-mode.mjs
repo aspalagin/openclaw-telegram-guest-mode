@@ -8,11 +8,19 @@
 //
 //   node check-guest-mode.mjs [--package-root <dir>] [--with-ultrafast] [--json]
 import path from "node:path";
-import { KIT_VERSION, TAG, TESTED_OPENCLAW_VERSIONS, buildCorpora, loadModule, loadPlan, parseOptions, readPackageVersion } from "./lib/kit.mjs";
+import { KIT_VERSION, TAG, TESTED_OPENCLAW_VERSIONS, UsageError, buildCorpora, loadModule, loadPlan, parseOptions, readPackageVersion } from "./lib/kit.mjs";
 
-const options = parseOptions();
+const USAGE = "usage: node check-guest-mode.mjs [--package-root <dir>] [--with-ultrafast] [--json]";
+let options;
+try {
+  options = parseOptions(process.argv.slice(2), ["--package-root", "--with-ultrafast", "--json", "--help", "-h"]);
+} catch (err) {
+  if (!(err instanceof UsageError)) throw err;
+  console.error(`${TAG} ${err.message}\n${USAGE}`);
+  process.exit(2);
+}
 if (options.help) {
-  console.log("usage: node check-guest-mode.mjs [--package-root <dir>] [--with-ultrafast] [--json]");
+  console.log(USAGE);
   process.exit(0);
 }
 
@@ -37,7 +45,7 @@ async function main() {
         const content = corpus.read(file);
         const skipReason = typeof mod.applicable === "function" ? mod.applicable(content, file, { packageRoot }) : null;
         if (skipReason) result.na = skipReason;
-        result.failures = (mod.check?.assertions ?? []).map((a) => a(content, file)).filter(Boolean);
+        result.failures = mod.check.assertions.map((a) => a(content, file)).filter(Boolean);
         result.ok = result.failures.length === 0;
       } catch (err) {
         result.failures = [err instanceof Error ? err.message : String(err)];

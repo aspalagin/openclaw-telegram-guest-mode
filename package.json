@@ -1,9 +1,10 @@
 {
   "name": "openclaw-telegram-guest-mode",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": false,
   "description": "Telegram Bot API guest-query support for OpenClaw as a portable dist patch layer (placeholder/edit, rich replies, sub-agent finals, media via staging chat).",
   "type": "module",
+  "author": "Arseniy Palagin",
   "homepage": "https://github.com/aspalagin/openclaw-telegram-guest-mode#readme",
   "repository": {
     "type": "git",
@@ -12,11 +13,32 @@
   "bugs": {
     "url": "https://github.com/aspalagin/openclaw-telegram-guest-mode/issues"
   },
+  "keywords": [
+    "openclaw",
+    "telegram",
+    "telegram-bot-api",
+    "guest-queries",
+    "guest-mode",
+    "patch",
+    "hotfix"
+  ],
+  "files": [
+    "apply-guest-mode.mjs",
+    "check-guest-mode.mjs",
+    "lib/",
+    "modules/",
+    "scripts/",
+    "examples/",
+    "README.md",
+    "CHANGELOG.md",
+    "HOTFIX_NOTES.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "check:syntax": "node --check apply-guest-mode.mjs && node --check check-guest-mode.mjs && for f in lib/*.mjs modules/*.mjs; do node --check \"$f\" || exit 1; done",
+    "check:syntax": "node scripts/check-syntax.mjs",
     "dry-run": "node apply-guest-mode.mjs --dry-run",
     "apply": "node apply-guest-mode.mjs",
     "check:installed": "node check-guest-mode.mjs"

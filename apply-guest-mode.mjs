@@ -5,23 +5,33 @@
 // to an installed OpenClaw package by patching built dist bundles in place. Tested baseline: OpenClaw
 // 2026.9.7. Review README.md and HOTFIX_NOTES.md before running this on a production host.
 //
-//   node apply-guest-mode.mjs [--dry-run|--check] [--package-root <dir>] [--backup-dir <dir>] [--with-ultrafast] [--json]
-//   env: OPENCLAW_PACKAGE_ROOT, OPENCLAW_HOTFIX_BACKUP_DIR, OPENCLAW_GUEST_MODE_ULTRAFAST=1
+//   node apply-guest-mode.mjs [--dry-run|--check] [--package-root <dir>] [--backup-dir <dir>] [--with-ultrafast] [--allow-untested] [--json]
+//   env: OPENCLAW_PACKAGE_ROOT, OPENCLAW_HOTFIX_BACKUP_DIR, OPENCLAW_GUEST_MODE_ULTRAFAST=1, OPENCLAW_GUEST_MODE_ALLOW_UNTESTED=1
 //
 // All-or-nothing: every plan entry is computed in memory first (locate → cascade patch → idempotency →
 // assertions → node --check); nothing is written if any entry fails. Writes are preceded by a per-file
 // backup. Re-running on a patched install reports every entry as unchanged; older module versions (the
-// v1.1.x kit or earlier module revisions) are upgraded in place.
+// v1.1.x kit or earlier module revisions) are upgraded in place. An OpenClaw version outside
+// TESTED_OPENCLAW_VERSIONS is refused unless --allow-untested is given: matching anchors on another
+// version prove nothing about the runtime behaviour of the inserted code.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { KIT_VERSION, TAG, TESTED_OPENCLAW_VERSIONS, buildCorpora, loadModule, loadPlan, parseOptions, readPackageVersion } from "./lib/kit.mjs";
+import { KIT_VERSION, TAG, TESTED_OPENCLAW_VERSIONS, UsageError, buildCorpora, loadModule, loadPlan, parseOptions, readPackageVersion } from "./lib/kit.mjs";
 
-const options = parseOptions();
+const USAGE = "usage: node apply-guest-mode.mjs [--dry-run|--check] [--package-root <dir>] [--backup-dir <dir>] [--with-ultrafast] [--allow-untested] [--json]";
+let options;
+try {
+  options = parseOptions();
+} catch (err) {
+  if (!(err instanceof UsageError)) throw err;
+  console.error(`${TAG} ${err.message}\n${USAGE}`);
+  process.exit(2);
+}
 if (options.help) {
-  console.log("usage: node apply-guest-mode.mjs [--dry-run|--check] [--package-root <dir>] [--backup-dir <dir>] [--with-ultrafast] [--json]");
+  console.log(USAGE);
   process.exit(0);
 }
 const log = (msg) => { if (!options.json) console.log(`${TAG} ${msg}`); };
@@ -36,9 +46,18 @@ async function main() {
   const { packageRoot, dryRun } = options;
   const corpora = buildCorpora(packageRoot);
   const version = readPackageVersion(packageRoot);
-  const report = { kit: KIT_VERSION, openclaw: version, packageRoot, dryRun, withUltrafast: options.withUltrafast, entries: [], failures: [], warnings: [], backup: null, status: null };
+  const report = { kit: KIT_VERSION, openclaw: version, packageRoot, dryRun, withUltrafast: options.withUltrafast, allowUntested: options.allowUntested, entries: [], failures: [], warnings: [], backup: null, status: null };
   if (!TESTED_OPENCLAW_VERSIONS.includes(version)) {
-    report.warnings.push(`OpenClaw ${version} is not a tested baseline (${TESTED_OPENCLAW_VERSIONS.join(", ")}); the anchors refuse unmatched code, but a green run on another version is not a verified port`);
+    if (!options.allowUntested) {
+      report.status = "refused";
+      report.failures.push(`OpenClaw ${version} is not a tested baseline (${TESTED_OPENCLAW_VERSIONS.join(", ")})`);
+      log(`refused: OpenClaw ${version} is not a tested baseline (${TESTED_OPENCLAW_VERSIONS.join(", ")}); matching anchors on another version are not a verified port. Re-run with --allow-untested (or OPENCLAW_GUEST_MODE_ALLOW_UNTESTED=1) to attempt it on a copy, then follow HOTFIX_NOTES.md "Porting".`);
+      log(`complete status=refused changed=0 (nothing written) entries=0 openclaw=${version} kit=${KIT_VERSION} packageRoot=${packageRoot}`);
+      if (options.json) console.log(JSON.stringify(report, null, 2));
+      process.exitCode = 1;
+      return;
+    }
+    report.warnings.push(`OpenClaw ${version} is not a tested baseline (${TESTED_OPENCLAW_VERSIONS.join(", ")}); --allow-untested given: the anchors refuse unmatched code, but a green run on another version is not a verified port`);
   }
   const plan = await loadPlan(options);
   const writes = [];
@@ -81,7 +100,7 @@ async function main() {
         writes.push({ file: item.file, before, after: src, key: entry.key });
       }
       for (const { name, mod } of active) {
-        for (const assertion of mod.check?.assertions ?? []) {
+        for (const assertion of mod.check.assertions) {
           const failure = assertion(src, item.file);
           if (failure) throw new Error(`${name}: assertion failed after patch: ${failure}`);
         }
@@ -97,7 +116,9 @@ async function main() {
     if (item.status === "failed") { log(`${item.key}: FAILED — ${item.error}`); continue; }
     const rel = path.relative(packageRoot, item.file);
     const names = item.modules.map((m) => `${m.name}${m.skipped ? "(n/a)" : m.changed ? "*" : ""}`).join(", ");
-    log(`${item.key} (${rel}): ${item.changed ? (dryRun ? "would patch" : "patch") : "ok"} [${names}]${item.changed ? "" : " (already applied)"}`);
+    const allSkipped = item.modules.length > 0 && item.modules.every((m) => m.skipped);
+    const suffix = item.changed ? "" : allSkipped ? " (n/a)" : " (already applied)";
+    log(`${item.key} (${rel}): ${item.changed ? (dryRun ? "would patch" : "patch") : "ok"} [${names}]${suffix}`);
     for (const s of item.skipped) log(`  ${s.name}: ${s.reason}`);
   }
   for (const w of report.warnings) log(`warn: ${w}`);
@@ -130,8 +151,10 @@ async function main() {
     report.status = "patched";
     log(`backup: ${backupDir}`);
   }
-  const changed = report.entries.filter((e) => e.changed).length;
-  log(`complete status=${report.status} changed=${changed} entries=${report.entries.length} openclaw=${version} kit=${KIT_VERSION} packageRoot=${packageRoot}`);
+  // `changed` counts entries actually written (or, in dry-run, entries that would be written). A failed
+  // run writes nothing, so it reports 0 even if some entries were patched in memory.
+  const changed = report.status === "failed" ? 0 : report.entries.filter((e) => e.changed).length;
+  log(`complete status=${report.status} changed=${changed}${report.status === "failed" ? " (nothing written)" : ""} entries=${report.entries.length} openclaw=${version} kit=${KIT_VERSION} packageRoot=${packageRoot}`);
   if (options.json) console.log(JSON.stringify(report, null, 2));
   if (report.status === "failed") process.exitCode = 1;
 }
