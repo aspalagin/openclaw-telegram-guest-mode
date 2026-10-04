@@ -1,240 +1,66 @@
 #!/usr/bin/env node
-// Signature checker for the OpenClaw Telegram Guest Mode patch layer
-// (apply-guest-mode.mjs). Every patch is required: any missing signature
-// fails the run with exit code 1. Run this after applying the patches and
-// after every OpenClaw package update.
-import fs from "node:fs";
+// Signature checker for the OpenClaw Telegram Guest Mode patch layer (apply-guest-mode.mjs).
+// Locates every target chunk, runs each module's assertions (markers, anchors, drift guards) against the
+// installed code and exits 1 when anything fails. Run it after applying the kit and after every OpenClaw
+// package update. Conditional modules (telegram-guest-allowed-update, guest-announce-fallback-skip)
+// report "n/a" when they do not apply to this build; the optional ultrafast set is checked only with
+// --with-ultrafast.
+//
+//   node check-guest-mode.mjs [--package-root <dir>] [--with-ultrafast] [--json]
 import path from "node:path";
+import { KIT_VERSION, TAG, TESTED_OPENCLAW_VERSIONS, buildCorpora, loadModule, loadPlan, parseOptions, readPackageVersion } from "./lib/kit.mjs";
 
-const packageRoot = process.env.OPENCLAW_PACKAGE_ROOT || "/usr/lib/node_modules/openclaw";
-const distDir = path.join(packageRoot, "dist");
-const expectedVersion = "2026.7.1-2";
-
-function rel(file) {
-  return path.relative("/", file);
+const options = parseOptions();
+if (options.help) {
+  console.log("usage: node check-guest-mode.mjs [--package-root <dir>] [--with-ultrafast] [--json]");
+  process.exit(0);
 }
 
-function readText(file) {
-  return fs.readFileSync(file, "utf8");
-}
-
-function walkJs(dir) {
-  const out = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...walkJs(full));
-    else if (entry.isFile() && entry.name.endsWith(".js")) out.push(full);
+async function main() {
+  const { packageRoot } = options;
+  const corpora = buildCorpora(packageRoot);
+  const version = readPackageVersion(packageRoot);
+  const plan = await loadPlan(options);
+  const results = [];
+  for (const entry of plan) {
+    const corpus = corpora[entry.corpus];
+    let file = null;
+    for (const name of entry.modules) {
+      const result = { key: entry.key, module: name, file: null, ok: false, na: false, failures: [] };
+      results.push(result);
+      try {
+        const mod = await loadModule(name);
+        if (!corpus) throw new Error(`corpus "${entry.corpus}" missing under ${packageRoot}`);
+        const located = corpus.locateModule(mod, file);
+        file = located.file;
+        result.file = file;
+        const content = corpus.read(file);
+        const skipReason = typeof mod.applicable === "function" ? mod.applicable(content, file, { packageRoot }) : null;
+        if (skipReason) result.na = skipReason;
+        result.failures = (mod.check?.assertions ?? []).map((a) => a(content, file)).filter(Boolean);
+        result.ok = result.failures.length === 0;
+      } catch (err) {
+        result.failures = [err instanceof Error ? err.message : String(err)];
+      }
+    }
   }
-  return out;
-}
-
-function findOneJs(files, label, needles) {
-  const matches = [];
-  for (const file of files) {
-    const content = readText(file);
-    if (needles.every((needle) => content.includes(needle))) matches.push({ file, content });
+  const failed = results.filter((r) => !r.ok);
+  if (options.json) {
+    console.log(JSON.stringify({ kit: KIT_VERSION, openclaw: version, packageRoot, results, ok: failed.length === 0 }, null, 2));
+  } else {
+    console.log(`${TAG} openclaw@${version} kit=${KIT_VERSION} root=${packageRoot}`);
+    if (!TESTED_OPENCLAW_VERSIONS.includes(version)) console.log(`${TAG} warn: version differs from tested baseline ${TESTED_OPENCLAW_VERSIONS.join(", ")}; review anchors before treating this as green`);
+    for (const r of results) {
+      const filePart = r.file ? ` ${path.relative(packageRoot, r.file)}` : "";
+      console.log(`[${r.ok ? (r.na ? "n/a" : "ok") : "fail"}] ${r.key}/${r.module}${filePart}${r.na ? ` — ${r.na}` : ""}`);
+      for (const f of r.failures) console.log(`  - ${f}`);
+    }
+    console.log(`${TAG} summary ok=${results.length - failed.length} failed=${failed.length}`);
   }
-  if (matches.length === 0) throw new Error(`could not locate ${label}`);
-  if (matches.length > 1) {
-    throw new Error(`located multiple ${label}: ${matches.map((match) => rel(match.file)).join(", ")}`);
-  }
-  return matches[0];
-}
-
-function contains(needle, detail = needle) {
-  return (content) => content.includes(needle) ? null : `missing ${detail}`;
-}
-
-function runCheck(files, check) {
-  try {
-    const target = check.locate(files);
-    const failures = check.assertions.map((assertion) => assertion(target.content, target.file)).filter(Boolean);
-    return { ...check, ok: failures.length === 0, file: target.file, failures };
-  } catch (err) {
-    return { ...check, ok: false, file: null, failures: [err instanceof Error ? err.message : String(err)] };
-  }
-}
-
-const checks = [
-  {
-    id: "telegram-guest-allowed-update",
-    locate: (files) => findOneJs(files, "Telegram allowed updates bundle", [
-      "resolveTelegramAllowedUpdates",
-      "message_reaction",
-      "channel_post",
-    ]),
-    assertions: [
-      contains('updates.includes("guest_message")', "guest_message allowed update"),
-    ],
-  },
-  {
-    id: "telegram-guest-mode-bot",
-    locate: (files) => findOneJs(files, "Telegram bot bundle", [
-      "handleInboundMessageLike",
-      "buildChannelInboundEventContext",
-      "sendTyping",
-    ]),
-    assertions: [
-      contains('bot.on("guest_message"', "guest_message handler"),
-      contains("resolveTelegramGuestSessionKey", "guest session key helper"),
-      contains("const isGuest = Boolean(guestQueryId);", "guest mode flag"),
-      contains('GuestMode: msg.guest_query_id ? true : void 0', "GuestMode context flag"),
-      contains("GuestQueryId", "GuestQueryId context field"),
-      contains("if (isGuest) return;", "guest typing/voice cue suppression"),
-      contains("guestModeDeliveryHint", "guest delivery hint"),
-    ],
-  },
-  {
-    id: "telegram-guest-mode-delivery",
-    locate: (files) => findOneJs(files, "Telegram delivery bundle", [
-      "deliverTextReply",
-      "sendChunkedTelegramReplyText",
-      "formatErrorMessage",
-    ]),
-    assertions: [
-      contains("answerGuestQuery", "answerGuestQuery API path"),
-      contains("answerTelegramGuestQueryViaOfficialApi", "official API fallback"),
-      contains("sendTelegramGuestText", "guest text sender"),
-      contains("params.progress.guestAnswered", "guest duplicate-send guard"),
-      contains("guestQueryId", "guest query id delivery option"),
-    ],
-  },
-  {
-    id: "guest-plain-bot-hint",
-    locate: (files) => findOneJs(files, "Telegram bot bundle", [
-      "handleInboundMessageLike",
-      "buildChannelInboundEventContext",
-      "sendTyping",
-    ]),
-    assertions: [
-      contains("Do not include model/context/status headers", "extended guest plain-text hint"),
-    ],
-  },
-  {
-    id: "guest-plain-delivery-normalize",
-    locate: (files) => findOneJs(files, "Telegram delivery bundle", [
-      "deliverTextReply",
-      "sendChunkedTelegramReplyText",
-      "formatErrorMessage",
-    ]),
-    assertions: [
-      contains("function normalizeTelegramGuestPlainText(text)", "guest plain normalize helper"),
-      contains("TELEGRAM_GUEST_MODEL_HEADER_RE", "guest model-header strip regex"),
-    ],
-  },
-  {
-    // v1.1.0 privacy hardening: per-chat guest session scope, prompt-context isolation,
-    // and an honest inbound log line naming the real caller.
-    id: "guest-privacy-hardening",
-    locate: (files) => findOneJs(files, "Telegram bot bundle", [
-      "handleInboundMessageLike",
-      "buildChannelInboundEventContext",
-      "sendTyping",
-    ]),
-    assertions: [
-      contains("`${callerUserId}-at-${chatScope}`", "per-chat guest session scope"),
-      contains("isGroup || isSessionBoundaryMessage || isGuestMessage ? []", "guest prompt-context isolation"),
-      contains("(guest query by ${context.ctxPayload.SenderId", "guest caller named in inbound log"),
-    ],
-  },
-  {
-    // v1.1.0 privacy hardening: delivery/spawn tools denied at policy level in guest runs.
-    id: "guest-deny-delivery-tools",
-    locate: (files) => findOneJs(files, "agent tools policy bundle", [
-      'label: "gateway sender owner-only tools"',
-      "const ownerOnlyCoreToolPolicy = ownerOnlyCoreToolDenylist.length > 0",
-    ]),
-    assertions: [
-      contains('label: "guest session tools.deny"', "guest deny policy step"),
-      contains('options.sessionKey.includes(":guest:")', "guest session gate"),
-    ],
-  },
-  {
-    // v1.1.1: verbose extras (new-session banner / auto-compaction notice /
-    // trailing plugin-status payload) are suppressed for guest sessions —
-    // multiple payloads broke the one-shot answerGuestQuery.
-    id: "guest-suppress-verbose-payloads",
-    locate: (files) => findOneJs(files, "agent runner runtime bundle", [
-      "function buildPendingFinalDeliveryText",
-      "pendingFinalDeliveryContext",
-      "resolveReplyRunDeliveryContext",
-    ]),
-    assertions: [
-      contains("hotfix: guest-suppress-verbose-payloads", "guest verbose suppression marker"),
-      contains("if (verboseEnabled && !isGuestReplySession && activeIsNewSession)", "new-session banner gated"),
-      contains("const shouldAppendTracePayload = (verboseEnabled || traceEnabledForSender) && !isGuestReplySession;", "trailing status payload gated"),
-    ],
-  },
-  {
-    // v1.1.1: guest replies are inline-or-dropped; the sendMessage fallback
-    // leaked replies into the operator's DM with the bot.
-    id: "guest-single-answer-guard",
-    locate: (files) => findOneJs(files, "Telegram delivery bundle", [
-      "deliverTextReply",
-      "sendChunkedTelegramReplyText",
-      "formatErrorMessage",
-    ]),
-    assertions: [
-      contains("hotfix: guest-single-answer-guard", "single-answer marker"),
-      contains("[hotfix][guest-single-answer]", "diagnostic log tag"),
-    ],
-  },
-  {
-    // v1.1.2: in-run verbose progress (commentary / tool progress) is disabled for
-    // guest sessions — with verbose enabled it consumed the one-shot answerGuestQuery
-    // on any run that called a tool, so the guest got a progress line, not an answer.
-    id: "guest-suppress-inrun-progress",
-    locate: (files) => findOneJs(files, "auto-reply dispatch bundle", [
-      "async function clearPendingFinalDeliveryAfterSuccess",
-      "const replies = replyResult ? Array.isArray(replyResult) ? replyResult : [replyResult] : []",
-    ]),
-    assertions: [
-      contains("hotfix: guest-suppress-inrun-progress", "in-run progress suppression marker"),
-      contains('const isGuestDispatchSession = typeof acpDispatchSessionKey === "string" && acpDispatchSessionKey.includes(":guest:");', "guest dispatch flag"),
-      contains("const shouldEmitVerboseProgress = isGuestDispatchSession ? () => false : verboseProgress.shouldEmit;", "verbose progress gated for guest"),
-      contains("const shouldEmitFullVerboseProgress = isGuestDispatchSession ? () => false : verboseProgress.shouldEmitFull;", "full verbose progress gated for guest"),
-    ],
-  },
-  {
-    // v1.1.2: a guest-session payload with no guestQueryId is never delivered as a plain
-    // message into the chat the query was typed in (observed bypass via richMessage).
-    id: "guest-no-chat-fallback",
-    locate: (files) => findOneJs(files, "Telegram delivery bundle", [
-      "deliverTextReply",
-      "sendChunkedTelegramReplyText",
-      "formatErrorMessage",
-    ]),
-    assertions: [
-      contains("hotfix: guest-no-chat-fallback", "guest chat-fallback guard marker"),
-      contains("[hotfix][guest-no-chat-fallback]", "diagnostic log tag"),
-      contains('if (!params.guestQueryId && typeof params.sessionKeyForInternalHooks === "string" && params.sessionKeyForInternalHooks.includes(":guest:")) {', "guard condition"),
-    ],
-  },
-];
-
-function main() {
-  if (!fs.existsSync(distDir)) throw new Error(`dist directory does not exist: ${distDir}`);
-  const pkg = JSON.parse(readText(path.join(packageRoot, "package.json")));
-  const files = walkJs(distDir);
-  const results = checks.map((check) => runCheck(files, check));
-  const failed = results.filter((result) => !result.ok);
-
-  console.log(`[openclaw-guest-mode] package=${pkg.name ?? "openclaw"}@${pkg.version ?? "unknown"} root=${packageRoot}`);
-  if (pkg.version !== expectedVersion) {
-    console.log(`[openclaw-guest-mode] warn: version differs from tested baseline ${expectedVersion}; review signatures before treating this as green`);
-  }
-  for (const result of results) {
-    const filePart = result.file ? ` ${rel(result.file)}` : "";
-    console.log(`[${result.ok ? "ok" : "fail"}] ${result.id}${filePart}`);
-    for (const failure of result.failures) console.log(`  - ${failure}`);
-  }
-  console.log(`[openclaw-guest-mode] summary ok=${results.length - failed.length} failed=${failed.length}`);
   if (failed.length > 0) process.exitCode = 1;
 }
 
-try {
-  main();
-} catch (err) {
-  console.error(`[openclaw-guest-mode] ${err instanceof Error ? err.message : String(err)}`);
+main().catch((err) => {
+  console.error(`${TAG} ${err instanceof Error ? err.message : String(err)}`);
   process.exitCode = 1;
-}
+});

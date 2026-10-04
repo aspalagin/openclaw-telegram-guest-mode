@@ -1,5 +1,79 @@
 # Changelog
 
+## v1.2.0 - 2026-10-04
+
+Re-port to OpenClaw `2026.9.7` plus the Guest Mode work of 2026-10-04. The kit
+is now modular (`lib/plan.mjs` + `modules/*.mjs`); anchors are located by
+content needles and every module carries its own drift assertions. Nothing is
+imported from an operator's private hotfix layer; host-specific paths and ids
+are gone (rules files resolve via env or the OpenClaw state dir, the media
+staging chat must be configured explicitly).
+
+New behaviour:
+
+- **Placeholder + in-place final** (`guest-ack-edit-delivery` v3 registry,
+  `guest-ack-edit-bot` arm v2): after `ackAfterSeconds` the query is answered
+  with a placeholder, a heartbeat edits the elapsed time, the final reply is
+  edited into the same inline message by `inline_message_id`; settle text when
+  the run fails or yields no text. Long runs no longer die on "query is too
+  old".
+- **Rich replies and rich append**: Markdown → Telegram rich message both for
+  the first answer and for every later edit/append (re-rendered as one
+  document through `planTelegramTextDeliveryPages`), plain-text retry on rich
+  errors, 4096 limit enforced by trimming whole Markdown blocks (old text
+  first, then new, chars only for a single oversized block).
+- **Sub-agent finals in the guest message** (`guest-announce-final-inline` v2,
+  `guest-announce-final-text-instruction` v2,
+  `guest-announce-final-text-settle-wake` v2, shared instruction text,
+  `guest-announce-fallback-skip` conditional): announce/settle completion
+  turns of a guest session — including private completion with
+  `deliver=false` — append their text to the guest's inline message instead of
+  sending to the chat on the session record (the owner's DM) or keeping it
+  internal; the completion instruction tells the sub-agent to answer with the
+  final text, not with a messaging tool.
+- **Tool policy v3** (`guest-deny-delivery-tools`): deny `gateway` always;
+  deny `message` only in `announce:` completion turns. Interactive guest turns
+  may use `message`, `sessions_spawn`, `cron`, `nodes`.
+- **Guest hint v4** (`guest-plain-bot-hint`): rich allowed, media recipe
+  (send with `media` and no target), code-mode recipe (call the `message`
+  global, not `catalog.search`).
+- **`message` from a guest turn** (`guest-inbound-kind-user-request`,
+  `message-inbound-turn-kind-normalize`): the kit no longer sends
+  `inboundEventKind: "guest_message"`, which the gateway schema rejected
+  (`inboundTurnKind` enum `user_request | room_event`); the runner also
+  normalizes unknown kinds.
+- **Files and photos for guests** (`telegram-sent-media-file-ids` v2,
+  `guest-media-staging-runner` v3, `guest-media-staging-delivery`): media sent
+  from a guest session is uploaded to a configured staging chat (direct Bot
+  API multipart for local files, regular pipeline for URLs/buffers), the
+  `file_id` is attached to the guest's inline message as a rich block
+  (`editMessageMedia` fallback; documents only via that fallback, caption
+  ≤ 1024), result reported to the model as `guestMediaDelivery`.
+- **Optional `--with-ultrafast`** (`guest-ultrafast-service-tier` v2,
+  `openai-ultrafast-tier.1/.2`): OpenAI `service_tier: "ultrafast"` by default
+  for session keys listed in a rules file (default `:guest:`), explicit
+  `serviceTier` wins.
+
+Re-anchored for 2026.9.7: `telegram-guest-mode-bot` is now two modules
+(ingress drain-factory + bot-message, `resolveTelegramTargetSession`,
+`sendChatAction`), `telegram-guest-mode-delivery` (`deliverTextReply(textReply)`,
+`sender.sendText`), `guest-no-chat-fallback` (guard at the head of
+`deliverReplyPlan`, export-list drift guard), `guest-context-isolation`
+(`sessionTranscript` field instead of the removed prompt-messages anchor),
+`guest-deny-delivery-tools` (`createEmbeddedMessageInvocationPolicy`, step
+`source`), `guest-suppress-verbose-payloads` (`buildReplyDiagnosticsPayload`).
+`telegram-guest-allowed-update` is conditional: grammy 1.46 already lists
+`guest_message` in `DEFAULT_UPDATE_TYPES`.
+
+Tooling: all-or-nothing apply with in-memory composition, idempotency
+double-pass, per-entry assertions and `node --check` before any write;
+`manifest.json` in each backup directory; `--json` reports; checker prints
+`n/a` for conditional modules and covers the optional set with
+`--with-ultrafast`.
+
+Known limitations are listed in README (inline media constraints, staging
+copy, registry lost on restart, Russian fallback strings).
+
 ## v1.1.3 - 2026-09-19
 
 Portability fix, no behaviour change.

@@ -1,774 +1,142 @@
 #!/usr/bin/env node
-// OpenClaw Telegram Guest Mode — portable dist patch layer.
+// OpenClaw Telegram Guest Mode — portable dist patch layer (apply).
 //
-// Adds Telegram Bot API guest-query support (supports_guest_queries /
-// guest_message / answerGuestQuery) to an installed OpenClaw package by
-// patching built dist/*.js bundles in place. Tested baseline: OpenClaw
-// 2026.7.1-2. Review README.md and HOTFIX_NOTES.md before running this on a
-// production host.
+// Adds Telegram Bot API guest-query support (supports_guest_queries / guest_message / answerGuestQuery)
+// to an installed OpenClaw package by patching built dist bundles in place. Tested baseline: OpenClaw
+// 2026.9.7. Review README.md and HOTFIX_NOTES.md before running this on a production host.
+//
+//   node apply-guest-mode.mjs [--dry-run|--check] [--package-root <dir>] [--backup-dir <dir>] [--with-ultrafast] [--json]
+//   env: OPENCLAW_PACKAGE_ROOT, OPENCLAW_HOTFIX_BACKUP_DIR, OPENCLAW_GUEST_MODE_ULTRAFAST=1
+//
+// All-or-nothing: every plan entry is computed in memory first (locate → cascade patch → idempotency →
+// assertions → node --check); nothing is written if any entry fails. Writes are preceded by a per-file
+// backup. Re-running on a patched install reports every entry as unchanged; older module versions (the
+// v1.1.x kit or earlier module revisions) are upgraded in place.
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { KIT_VERSION, TAG, TESTED_OPENCLAW_VERSIONS, buildCorpora, loadModule, loadPlan, parseOptions, readPackageVersion } from "./lib/kit.mjs";
 
-const packageRoot = process.env.OPENCLAW_PACKAGE_ROOT || "/usr/lib/node_modules/openclaw";
-const distDir = path.join(packageRoot, "dist");
-const backupRoot = process.env.OPENCLAW_HOTFIX_BACKUP_DIR || "./backups";
-const dryRun = process.argv.includes("--dry-run") || process.argv.includes("--check");
-const expectedVersion = "2026.7.1-2";
-
-function fail(message) {
-  console.error(`[openclaw-guest-mode] ${message}`);
-  process.exitCode = 1;
+const options = parseOptions();
+if (options.help) {
+  console.log("usage: node apply-guest-mode.mjs [--dry-run|--check] [--package-root <dir>] [--backup-dir <dir>] [--with-ultrafast] [--json]");
+  process.exit(0);
+}
+const log = (msg) => { if (!options.json) console.log(`${TAG} ${msg}`); };
+const sha256 = (text) => crypto.createHash("sha256").update(text).digest("hex");
+const timestamp = () => new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "Z");
+function nodeCheck(file) {
+  const r = spawnSync(process.execPath, ["--check", file], { encoding: "utf8" });
+  return r.status === 0 ? null : (r.stderr || r.stdout || "node --check failed").slice(0, 600);
 }
 
-function sha256(text) {
-  return crypto.createHash("sha256").update(text).digest("hex");
-}
-
-function timestamp() {
-  return new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "Z");
-}
-
-function read(file) {
-  return fs.readFileSync(file, "utf8");
-}
-
-function walkJs(dir) {
-  const out = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...walkJs(full));
-    else if (entry.isFile() && entry.name.endsWith(".js")) out.push(full);
+async function main() {
+  const { packageRoot, dryRun } = options;
+  const corpora = buildCorpora(packageRoot);
+  const version = readPackageVersion(packageRoot);
+  const report = { kit: KIT_VERSION, openclaw: version, packageRoot, dryRun, withUltrafast: options.withUltrafast, entries: [], failures: [], warnings: [], backup: null, status: null };
+  if (!TESTED_OPENCLAW_VERSIONS.includes(version)) {
+    report.warnings.push(`OpenClaw ${version} is not a tested baseline (${TESTED_OPENCLAW_VERSIONS.join(", ")}); the anchors refuse unmatched code, but a green run on another version is not a verified port`);
   }
-  return out;
-}
+  const plan = await loadPlan(options);
+  const writes = [];
 
-function findOne(files, label, needles) {
-  const matches = [];
-  for (const file of files) {
-    const content = read(file);
-    if (needles.every((needle) => content.includes(needle))) matches.push(file);
-  }
-  if (matches.length === 0) throw new Error(`could not find ${label}`);
-  if (matches.length > 1) throw new Error(`found multiple ${label}: ${matches.join(", ")}`);
-  return matches[0];
-}
-
-function replaceOnce(source, before, after, label) {
-  const index = source.indexOf(before);
-  if (index === -1) throw new Error(`missing ${label}`);
-  if (source.indexOf(before, index + before.length) !== -1) throw new Error(`ambiguous ${label}`);
-  return `${source.slice(0, index)}${after}${source.slice(index + before.length)}`;
-}
-
-function insertBefore(source, before, insert, label) {
-  if (source.includes(insert.trim())) return source;
-  const index = source.indexOf(before);
-  if (index === -1) throw new Error(`missing insertion point for ${label}`);
-  return `${source.slice(0, index)}${insert}${source.slice(index)}`;
-}
-
-function backupFile(file, before) {
-  const rel = path.relative(packageRoot, file);
-  const backupPath = path.join(backupRoot, timestamp(), `${rel}.${sha256(before).slice(0, 12)}.bak`);
-  fs.mkdirSync(path.dirname(backupPath), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(backupPath, before, { mode: 0o600 });
-  return backupPath;
-}
-
-// Dry-run keeps transformations cumulative in memory so that the cascade
-// patches (guest-plain-bot-hint, guest-plain-delivery-normalize) see the
-// output of the patches they depend on without writing package files.
-const pendingContents = new Map();
-
-function applyFile(file, label, patch) {
-  const before = pendingContents.get(file) ?? read(file);
-  const after = patch(before);
-  if (after === before) {
-    console.log(`[openclaw-guest-mode] ${label}: ok`);
-    return { label, file, changed: false };
-  }
-  if (dryRun) {
-    pendingContents.set(file, after);
-    console.log(`[openclaw-guest-mode] ${label}: would patch ${file}`);
-    return { label, file, changed: true };
-  }
-  const backupPath = backupFile(file, before);
-  fs.writeFileSync(file, after, "utf8");
-  console.log(`[openclaw-guest-mode] ${label}: patched ${file}; backup=${backupPath}`);
-  return { label, file, changed: true, backupPath };
-}
-
-function patchAllowedUpdates(source) {
-  if (source.includes('updates.includes("guest_message")')) return source;
-  return replaceOnce(
-    source,
-    '\tif (!updates.includes("message_reaction")) updates.push("message_reaction");',
-    '\tif (!updates.includes("guest_message")) updates.push("guest_message");\n\tif (!updates.includes("message_reaction")) updates.push("message_reaction");',
-    "guest_message allowed update",
-  );
-}
-
-function patchBot(source) {
-  if (source.includes("normalizeTelegramGuestSessionScope")) return source;
-  const replaceOnce = (src, before, after, label) => {
-    const index = src.indexOf(before);
-    if (index === -1) throw new Error(`missing ${label}`);
-    if (src.indexOf(before, index + before.length) !== -1) throw new Error(`ambiguous ${label}`);
-    return `${src.slice(0, index)}${after}${src.slice(index + before.length)}`;
-  };
-  const insertBefore = (src, before, insert, label) => {
-    if (src.includes(insert.trim())) return src;
-    const index = src.indexOf(before);
-    if (index === -1) throw new Error(`missing insertion point for ${label}`);
-    return `${src.slice(0, index)}${insert}${src.slice(index)}`;
-  };
-  const insertAfter = (src, after, insert, label) => {
-    if (src.includes(insert.trim())) return src;
-    const index = src.indexOf(after);
-    if (index === -1) throw new Error(`missing insertion point for ${label}`);
-    return `${src.slice(0, index + after.length)}${insert}${src.slice(index + after.length)}`;
-  };
-  let next = source;
-  next = insertAfter(
-    next,
-    'function createTelegramIngressSubject(senderId) {\n\treturn { stableId: senderId };\n}\n',
-    `function normalizeTelegramGuestSessionScope(value) {
-\tconst normalized = String(value ?? "").trim().toLowerCase();
-\tconst safe = normalized.replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
-\treturn safe.slice(0, 96) || "unknown";
-}
-function resolveTelegramGuestSessionKey(baseSessionKey, msg) {
-\tconst guestQueryId = typeof msg.guest_query_id === "string" && msg.guest_query_id.trim() ? msg.guest_query_id.trim() : "";
-\tif (!guestQueryId) return baseSessionKey;
-\tconst callerChatId = msg.guest_bot_caller_chat?.id != null ? String(msg.guest_bot_caller_chat.id) : "";
-\tconst callerUserId = msg.guest_bot_caller_user?.id != null ? String(msg.guest_bot_caller_user.id) : msg.from?.id != null ? String(msg.from.id) : "";
-\t// Scope = caller + chat: a caller's guest queries in different chats MUST NOT share a
-\t// session, otherwise context from a conversation with one third party leaks into a reply
-\t// published in a chat with another (guest replies are visible to everyone in that chat).
-\tconst chatScope = msg.chat?.id != null ? String(msg.chat.id) : callerChatId;
-\tconst scope = callerUserId && chatScope ? \`\${callerUserId}-at-\${chatScope}\` : chatScope || callerUserId || guestQueryId;
-\treturn \`\${baseSessionKey}:guest:\${normalizeTelegramGuestSessionScope(scope)}\`;
-}
-`,
-    "Telegram guest session helpers",
-  );
-  next = insertBefore(
-    next,
-    '\tbot.on("edited_message", async (ctx) => {',
-    `\tbot.on("guest_message", async (ctx) => {
-\t\tconst msg = ctx.guestMessage ?? ctx.update?.guest_message;
-\t\tif (!msg) return;
-\t\tconst guestQueryId = typeof msg.guest_query_id === "string" && msg.guest_query_id.trim() ? msg.guest_query_id.trim() : void 0;
-\t\tif (!guestQueryId) {
-\t\t\tlogVerbose("telegram guest_message skipped: missing guest_query_id");
-\t\t\treturn;
-\t\t}
-\t\tconst guestFrom = msg.from ?? msg.guest_bot_caller_user;
-\t\tconst normalizedMsg = withResolvedTelegramForumFlag({
-\t\t\t...msg,
-\t\t\t...(guestFrom ? { from: guestFrom } : {})
-\t\t}, false);
-\t\tif (normalizedMsg.from?.id != null && normalizedMsg.from.id === ctx.me?.id) return;
-\t\tawait handleInboundMessageLike({
-\t\t\tctxForDedupe: ctx,
-\t\t\tctx: buildSyntheticContext(ctx, normalizedMsg),
-\t\t\tmsg: normalizedMsg,
-\t\t\tchatId: normalizedMsg.chat.id,
-\t\t\tisGroup: false,
-\t\t\tisForum: false,
-\t\t\tmessageThreadId: void 0,
-\t\t\tsenderId: normalizedMsg.from?.id != null ? String(normalizedMsg.from.id) : "",
-\t\t\tsenderUsername: normalizedMsg.from?.username ?? "",
-\t\t\trequireConfiguredGroup: false,
-\t\t\tsendOversizeWarning: false,
-\t\t\toversizeLogMessage: "guest message media exceeds size limit",
-\t\t\terrorMessage: "guest_message handler failed"
-\t\t});
-\t});
-`,
-    "Telegram guest_message handler",
-  );
-  if (!next.includes("const isGuest = Boolean(guestQueryId);")) {
-    next = replaceOnce(
-      next,
-      `\tconst msg = primaryCtx.message;
-\tconst chatId = msg.chat.id;
-\tconst isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
-\tconst senderId = msg.from?.id ? String(msg.from.id) : "";
-\tconst messageThreadId = msg.message_thread_id;
-\tconst reactionApi = typeof bot.api.setMessageReaction === "function" ? bot.api.setMessageReaction.bind(bot.api) : null;`,
-      `\tconst msg = primaryCtx.message;
-\tconst chatId = msg.chat.id;
-\tconst guestQueryId = typeof msg.guest_query_id === "string" && msg.guest_query_id.trim() ? msg.guest_query_id.trim() : void 0;
-\tconst isGuest = Boolean(guestQueryId);
-\tconst isGroup = !isGuest && (msg.chat.type === "group" || msg.chat.type === "supergroup");
-\tconst senderId = msg.from?.id ? String(msg.from.id) : msg.guest_bot_caller_user?.id != null ? String(msg.guest_bot_caller_user.id) : "";
-\tconst messageThreadId = msg.message_thread_id;
-\tconst reactionApi = !isGuest && typeof bot.api.setMessageReaction === "function" ? bot.api.setMessageReaction.bind(bot.api) : null;`,
-      "Telegram guest message-context header",
-    );
-  }
-  next = next.replaceAll(
-    `\tconst senderUsername = msg.from?.username ?? "";`,
-    `\tconst senderUsername = msg.from?.username ?? msg.guest_bot_caller_user?.username ?? "";`,
-  );
-  if (!next.includes(`\tconst sendTyping = async () => {
-\t\tif (isGuest) return;`)) {
-    next = replaceOnce(
-      next,
-      `\tconst sendTyping = async () => {
-\t\tawait withTelegramApiErrorLogging({`,
-      `\tconst sendTyping = async () => {
-\t\tif (isGuest) return;
-\t\tawait withTelegramApiErrorLogging({`,
-      "Telegram guest typing suppression",
-    );
-  }
-  if (!next.includes(`\tconst sendRecordVoice = async () => {
-\t\tif (isGuest) return;`)) {
-    next = replaceOnce(
-      next,
-      `\tconst sendRecordVoice = async () => {
-\t\ttry {`,
-      `\tconst sendRecordVoice = async () => {
-\t\tif (isGuest) return;
-\t\ttry {`,
-      "Telegram guest voice cue suppression",
-    );
-  }
-  if (!next.includes("resolveTelegramGuestSessionKey(threadedSessionKey, msg)")) {
-    next = replaceOnce(
-      next,
-      `\tconst sessionKey = (shouldUseTelegramDmThreadSession({
-\t\tdmThreadId,
-\t\tbotHasTopicsEnabled: resolveTelegramBotHasTopicsEnabled(primaryCtx.me)
-\t}) && dmThreadId != null ? resolveThreadSessionKeys({
-\t\tbaseSessionKey,
-\t\tthreadId: \`\${chatId}:\${dmThreadId}\`
-\t}) : null)?.sessionKey ?? baseSessionKey;`,
-      `\tconst threadedSessionKey = (shouldUseTelegramDmThreadSession({
-\t\tdmThreadId,
-\t\tbotHasTopicsEnabled: resolveTelegramBotHasTopicsEnabled(primaryCtx.me)
-\t}) && dmThreadId != null ? resolveThreadSessionKeys({
-\t\tbaseSessionKey,
-\t\tthreadId: \`\${chatId}:\${dmThreadId}\`
-\t}) : null)?.sessionKey ?? baseSessionKey;
-\tconst sessionKey = isGuest ? resolveTelegramGuestSessionKey(threadedSessionKey, msg) : threadedSessionKey;`,
-      "Telegram guest session key",
-    );
-  }
-  if (!next.includes("GuestDeliveryHint")) {
-    // 2026.7.1-2: inboundEventKind is classified with an inline conversation-kind
-    // argument and reaches buildTelegramInboundContextPayload via params (both `msg`
-    // and `inboundEventKind` are destructured there and in scope at the ctxPayload
-    // call). Existence assertion replaces the old identity replaceOnce on the
-    // `conversationKind` adjacency, which no longer exists.
-    if (!next.includes('const inboundEventKind = classifyChannelInboundEvent({\n\t\tconversation: { kind: isGroup ? "group" : "direct" },')) {
-      throw new Error("missing Telegram inbound event anchor");
+  for (const entry of plan) {
+    const item = { key: entry.key, optional: entry.optional ?? null, file: null, modules: [], skipped: [], changed: false, status: "ok", error: null };
+    report.entries.push(item);
+    try {
+      const corpus = corpora[entry.corpus];
+      if (!corpus) throw new Error(`corpus "${entry.corpus}" missing (node_modules/@openclaw/ai/dist not found under ${packageRoot})`);
+      const loaded = [];
+      for (const name of entry.modules) {
+        const mod = await loadModule(name);
+        const { file, via } = corpus.locateModule(mod, item.file);
+        if (item.file && file !== item.file) throw new Error(`${name}: located ${path.basename(file)} but earlier modules of "${entry.key}" located ${path.basename(item.file)}`);
+        item.file = file;
+        loaded.push({ name, mod, via });
+      }
+      const before = corpus.read(item.file);
+      let src = before;
+      const active = [];
+      for (const { name, mod, via } of loaded) {
+        const skipReason = typeof mod.applicable === "function" ? mod.applicable(src, item.file, { packageRoot }) : null;
+        if (skipReason) { item.skipped.push({ name, reason: skipReason }); item.modules.push({ name, changed: false, skipped: true, via }); active.push({ name, mod }); continue; }
+        const next = mod.patch(src);
+        item.modules.push({ name, changed: next !== src, skipped: false, via });
+        active.push({ name, mod });
+        src = next;
+      }
+      let again = src;
+      for (const { mod } of active) { if (typeof mod.applicable === "function" && mod.applicable(again, item.file, { packageRoot })) continue; again = mod.patch(again); }
+      if (again !== src) throw new Error("composite is not idempotent (second pass changed the file)");
+      item.changed = src !== before;
+      if (item.changed) {
+        const tmp = path.join(os.tmpdir(), `oc-guest-mode-${process.pid}-${path.basename(item.file)}`);
+        fs.writeFileSync(tmp, src);
+        const synErr = nodeCheck(tmp);
+        fs.unlinkSync(tmp);
+        if (synErr) throw new Error(`syntax: ${synErr}`);
+        writes.push({ file: item.file, before, after: src, key: entry.key });
+      }
+      for (const { name, mod } of active) {
+        for (const assertion of mod.check?.assertions ?? []) {
+          const failure = assertion(src, item.file);
+          if (failure) throw new Error(`${name}: assertion failed after patch: ${failure}`);
+        }
+      }
+    } catch (err) {
+      item.status = "failed";
+      item.error = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+      report.failures.push(`${entry.key}: ${item.error}`);
     }
-    next = replaceOnce(
-      next,
-      `\tconst ctxPayload = await sessionRuntime.buildChannelInboundEventContext({`,
-      `\tconst effectiveInboundEventKind = msg.guest_query_id ? "guest_message" : inboundEventKind;
-\tconst guestModeDeliveryHint = msg.guest_query_id ? "Telegram Guest Mode: deliver the final reply as concise plain text only. Do not use message delivery tools, TTS, voice, audio, files, media, reactions, or typing cues. You may use available tools, including longer-running tools, when needed to complete the user's request; do not refuse only because this is Guest Mode." : void 0;
-\tconst ctxPayload = await sessionRuntime.buildChannelInboundEventContext({`,
-      "Telegram guest delivery hint",
-    );
-    next = replaceOnce(
-      next,
-      `\t\tmessage: {
-\t\t\tinboundEventKind,
-\t\t\tbody,
-\t\t\trawBody,
-\t\t\tbodyForAgent: bodyText,`,
-      `\t\tmessage: {
-\t\t\tinboundEventKind: effectiveInboundEventKind,
-\t\t\tbody,
-\t\t\trawBody,
-\t\t\tbodyForAgent: guestModeDeliveryHint ? \`\${bodyText}\\n\\n\${guestModeDeliveryHint}\` : bodyText,`,
-      "Telegram guest inbound payload",
-    );
-    next = replaceOnce(
-      next,
-      `\t\t\tForwardedFromMessageId: visibleForwardOrigin?.fromMessageId,
-\t\t\tWasMentioned: isGroup ? effectiveWasMentioned : void 0,
-\t\t\tSticker: allMedia[0]?.stickerMetadata,`,
-      `\t\t\tForwardedFromMessageId: visibleForwardOrigin?.fromMessageId,
-\t\t\tWasMentioned: isGroup ? effectiveWasMentioned : void 0,
-\t\t\tGuestMode: msg.guest_query_id ? true : void 0,
-\t\t\tGuestDeliveryHint: guestModeDeliveryHint,
-\t\t\tGuestQueryId: typeof msg.guest_query_id === "string" ? msg.guest_query_id : void 0,
-\t\t\tGuestBotCallerUserId: msg.guest_bot_caller_user?.id != null ? String(msg.guest_bot_caller_user.id) : void 0,
-\t\t\tGuestBotCallerChatId: msg.guest_bot_caller_chat?.id != null ? String(msg.guest_bot_caller_chat.id) : void 0,
-\t\t\tSticker: allMedia[0]?.stickerMetadata,`,
-      "Telegram guest context extras",
-    );
   }
-  if (!next.includes("const isGuestQuery = Boolean(guestQueryId);")) {
-    next = replaceOnce(
-      next,
-      `\tconst streamDeliveryEnabled = !isRoomEvent && streamMode !== "off";`,
-      `\tconst guestQueryId = typeof ctxPayload.GuestQueryId === "string" && ctxPayload.GuestQueryId.trim() ? ctxPayload.GuestQueryId.trim() : void 0;
-\tconst isGuestQuery = Boolean(guestQueryId);
-\tconst streamDeliveryEnabled = !isRoomEvent && !isGuestQuery && streamMode !== "off";`,
-      "Telegram guest stream suppression",
-    );
+
+  for (const item of report.entries) {
+    if (item.status === "failed") { log(`${item.key}: FAILED — ${item.error}`); continue; }
+    const rel = path.relative(packageRoot, item.file);
+    const names = item.modules.map((m) => `${m.name}${m.skipped ? "(n/a)" : m.changed ? "*" : ""}`).join(", ");
+    log(`${item.key} (${rel}): ${item.changed ? (dryRun ? "would patch" : "patch") : "ok"} [${names}]${item.changed ? "" : " (already applied)"}`);
+    for (const s of item.skipped) log(`  ${s.name}: ${s.reason}`);
   }
-  if (!next.includes(`\t\tguestQueryId,
-\t\treplyQuoteMessageId,`)) {
-    next = replaceOnce(
-      next,
-      `\t\tlinkPreview: telegramCfg.linkPreview,
-\t\treplyQuoteMessageId,`,
-      `\t\tlinkPreview: telegramCfg.linkPreview,
-\t\tguestQueryId,
-\t\treplyQuoteMessageId,`,
-      "Telegram guest delivery option",
-    );
+  for (const w of report.warnings) log(`warn: ${w}`);
+
+  if (report.failures.length) {
+    report.status = "failed";
+  } else if (dryRun) {
+    report.status = writes.length ? "dry-run" : "unchanged";
+  } else if (writes.length === 0) {
+    report.status = "unchanged";
+  } else {
+    const backupDir = path.join(options.backupRoot, timestamp());
+    fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+    for (const w of writes) {
+      const rel = path.relative(packageRoot, w.file);
+      const backupPath = path.join(backupDir, `${rel}.${sha256(w.before).slice(0, 12)}.bak`);
+      fs.mkdirSync(path.dirname(backupPath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(backupPath, w.before, { mode: 0o600 });
+    }
+    fs.writeFileSync(path.join(backupDir, "manifest.json"), JSON.stringify({ kit: KIT_VERSION, openclaw: version, packageRoot, files: writes.map((w) => ({ file: path.relative(packageRoot, w.file), key: w.key, sha256Before: sha256(w.before), sha256After: sha256(w.after) })) }, null, 2));
+    report.backup = backupDir;
+    for (const w of writes) {
+      fs.writeFileSync(w.file, w.after, "utf8");
+      const synErr = nodeCheck(w.file);
+      if (synErr) {
+        fs.writeFileSync(w.file, w.before, "utf8");
+        throw new Error(`post-write syntax check failed for ${w.file}, restored original: ${synErr}`);
+      }
+    }
+    report.status = "patched";
+    log(`backup: ${backupDir}`);
   }
-  if (!next.includes("options?.durable && durableDelivery && !guestQueryId")) {
-    next = replaceOnce(
-      next,
-      `\t\t\tif (options?.durable && durableDelivery) {`,
-      `\t\t\tif (options?.durable && durableDelivery && !guestQueryId) {`,
-      "Telegram guest durable suppression",
-    );
-  }
-  // Privacy hardening (v1.1.0): a guest reply is published in a chat the bot does not own,
-  // so the prompt must never carry the operator's private session transcript.
-  if (!next.includes("isGuestMessage")) {
-    next = replaceOnce(
-      next,
-      `\t\tconst sessionPromptMessages = isGroup || isSessionBoundaryMessage ? [] : await buildTelegramSessionTranscriptPromptMessages({`,
-      `\t\tconst isGuestMessage = typeof msg.guest_query_id === "string" && msg.guest_query_id.trim().length > 0;
-\t\tconst sessionPromptMessages = isGroup || isSessionBoundaryMessage || isGuestMessage ? [] : await buildTelegramSessionTranscriptPromptMessages({`,
-      "Telegram guest prompt-context isolation",
-    );
-  }
-  // Diagnostics (v1.1.0): for guest updates the inbound log line prints the CHAT id in the
-  // "from" field (the chat where the query was typed), which reads as the sender and has
-  // already caused one misdiagnosis. Name the real caller explicitly.
-  if (!next.includes("(guest query by ")) {
-    next = replaceOnce(
-      next,
-      `telegramInboundLog.info(formatTelegramInboundLogLine({\n\t\t\tfrom: context.ctxPayload.From,`,
-      `telegramInboundLog.info(formatTelegramInboundLogLine({\n\t\t\tfrom: context.ctxPayload.GuestQueryId ? \`\${context.ctxPayload.From} (guest query by \${context.ctxPayload.SenderId ?? "unknown"})\` : context.ctxPayload.From,`,
-      "Telegram guest inbound log caller",
-    );
-  }
-  return next;
+  const changed = report.entries.filter((e) => e.changed).length;
+  log(`complete status=${report.status} changed=${changed} entries=${report.entries.length} openclaw=${version} kit=${KIT_VERSION} packageRoot=${packageRoot}`);
+  if (options.json) console.log(JSON.stringify(report, null, 2));
+  if (report.status === "failed") process.exitCode = 1;
 }
 
-// Privacy hardening (v1.1.0): the guest prompt only ASKS the model not to use delivery tools.
-// A guest run must not be able to message arbitrary chats or spawn sub-agents, so deny those
-// tools at the policy level for any session key scoped as ":guest:".
-function patchAgentToolsGuestDeny(source) {
-  if (source.includes("guest session tools.deny")) return source;
-  const replaceOnce = (src, before, after, label) => {
-    const index = src.indexOf(before);
-    if (index === -1) throw new Error(`missing ${label}`);
-    if (src.indexOf(before, index + before.length) !== -1) throw new Error(`ambiguous ${label}`);
-    return `${src.slice(0, index)}${after}${src.slice(index + before.length)}`;
-  };
-  return replaceOnce(
-    source,
-    `\t\t\t{\n\t\t\t\tpolicy: ownerOnlyCoreToolPolicy,\n\t\t\t\tlabel: "gateway sender owner-only tools",\n\t\t\t\tunavailableCoreToolReason\n\t\t\t},`,
-    [
-      "\t\t\t{",
-      "\t\t\t\tpolicy: ownerOnlyCoreToolPolicy,",
-      '\t\t\t\tlabel: "gateway sender owner-only tools",',
-      "\t\t\t\tunavailableCoreToolReason",
-      "\t\t\t},",
-      '\t\t\t...(typeof options?.sessionKey === "string" && options.sessionKey.includes(":guest:") ? [{',
-      '\t\t\t\tpolicy: { deny: ["message", "sessions_spawn", "cron", "gateway", "nodes"] },',
-      '\t\t\t\tlabel: "guest session tools.deny",',
-      "\t\t\t\tunavailableCoreToolReason",
-      "\t\t\t}] : []),",
-    ].join("\n"),
-    "agent tools guest deny step",
-  );
-}
-
-function patchDelivery(source) {
-  let next = source;
-  if (!next.includes("TELEGRAM_GUEST_TEXT_LIMIT")) {
-    next = insertBefore(
-      next,
-      "//#endregion\n//#region extensions/telegram/src/bot/reply-threading.ts",
-      `const TELEGRAM_GUEST_TEXT_LIMIT = 4096;
-const TELEGRAM_GUEST_QUERY_EXPIRED_RE = /query is too old|response timeout expired|query ID is invalid/i;
-function buildTelegramGuestResultId() {
-\treturn \`oc-\${Date.now().toString(36)}\`;
-}
-function isTelegramGuestQueryExpiredError(err) {
-\treturn TELEGRAM_GUEST_QUERY_EXPIRED_RE.test(formatErrorMessage(err));
-}
-function truncateTelegramGuestText(text) {
-\tif (text.length <= TELEGRAM_GUEST_TEXT_LIMIT) return text;
-\tconst suffix = "\\n\\n[Ответ обрезан из-за лимита Telegram guest mode.]";
-\treturn \`\${text.slice(0, Math.max(1, TELEGRAM_GUEST_TEXT_LIMIT - suffix.length - 1)).trimEnd()}…\${suffix}\`;
-}
-function buildTelegramGuestTextResult(text, opts) {
-\tconst inputMessageContent = {
-\t\tmessage_text: truncateTelegramGuestText(text),
-\t\t...(opts?.parseMode ? { parse_mode: opts.parseMode } : {}),
-\t\t...((opts?.linkPreview ?? true) ? {} : { link_preview_options: { is_disabled: true } })
-\t};
-\treturn {
-\t\ttype: "article",
-\t\tid: buildTelegramGuestResultId(),
-\t\ttitle: "Ответ",
-\t\tinput_message_content: inputMessageContent,
-\t\t...opts?.replyMarkup ? { reply_markup: opts.replyMarkup } : {}
-\t};
-}
-async function answerTelegramGuestQueryViaOfficialApi(guestQueryId, result, token) {
-\tif (!token?.trim()) throw new Error("telegram answerGuestQuery fallback unavailable: missing bot token");
-\tconst res = await fetch(\`https://api.telegram.org/bot\${token}/answerGuestQuery\`, {
-\t\tmethod: "POST",
-\t\theaders: { "content-type": "application/json" },
-\t\tbody: JSON.stringify({
-\t\t\tguest_query_id: guestQueryId,
-\t\t\tresult
-\t\t})
-\t});
-\tconst data = await res.json().catch(() => null);
-\tif (!res.ok || !data?.ok) {
-\t\tconst description = typeof data?.description === "string" ? data.description : \`HTTP \${res.status}\`;
-\t\tthrow new Error(\`telegram answerGuestQuery failed: \${description}\`);
-\t}
-\treturn data.result;
-}
-async function answerTelegramGuestQuery(bot, guestQueryId, result, runtime, opts) {
-\tif (typeof bot.api.answerGuestQuery === "function") return await sendTelegramWithThreadFallback({
-\t\toperation: "answerGuestQuery",
-\t\truntime,
-\t\trequestParams: {},
-\t\tsend: () => bot.api.answerGuestQuery(guestQueryId, result)
-\t});
-\tif (typeof bot.api.raw?.answerGuestQuery === "function") return await sendTelegramWithThreadFallback({
-\t\toperation: "answerGuestQuery",
-\t\truntime,
-\t\trequestParams: {},
-\t\tsend: () => bot.api.raw.answerGuestQuery({
-\t\t\tguest_query_id: guestQueryId,
-\t\t\tresult
-\t\t})
-\t});
-\tif (opts?.token) return await sendTelegramWithThreadFallback({
-\t\toperation: "answerGuestQuery (official api fallback)",
-\t\truntime,
-\t\trequestParams: {},
-\t\tsend: () => answerTelegramGuestQueryViaOfficialApi(guestQueryId, result, opts.token)
-\t});
-\tthrow new Error("telegram answerGuestQuery unavailable");
-}
-async function sendTelegramGuestText(bot, guestQueryId, text, runtime, opts) {
-\tif (!guestQueryId.trim() || !text.trim()) return;
-\tconst result = buildTelegramGuestTextResult(text, {
-\t\tparseMode: opts?.parseMode,
-\t\tlinkPreview: opts?.linkPreview,
-\t\treplyMarkup: opts?.replyMarkup
-\t});
-\tconst sent = await answerTelegramGuestQuery(bot, guestQueryId, result, runtime, { token: opts?.token });
-\tconst inlineMessageId = sent?.inline_message_id;
-\truntime.log?.(\`telegram answerGuestQuery ok inline_message_id=\${inlineMessageId ?? "unknown"}\`);
-\treturn inlineMessageId ?? "guest";
-}
-`,
-      "Telegram guest delivery helpers",
-    );
-  }
-  if (!next.includes("params.progress.guestAnswered")) {
-    next = replaceOnce(
-      next,
-      `async function deliverTextReply(params) {
-\tlet firstDeliveredMessageId;
-\tawait sendChunkedTelegramReplyText({`,
-      `async function deliverTextReply(params) {
-\tlet firstDeliveredMessageId;
-\tif (params.guestQueryId) {
-\t\tif (params.progress.guestAnswered) return;
-\t\tconst chunks = filterEmptyTelegramTextChunks(params.chunkText(params.replyText));
-\t\tconst firstChunk = chunks[0];
-\t\tconst fallbackText = firstChunk?.text ?? params.replyText;
-\t\tconst text = chunks.length > 1 ? \`\${fallbackText.trimEnd()}\\n\\n[Ответ обрезан из-за лимита Telegram guest mode.]\` : fallbackText;
-\t\ttry {
-\t\t\tfirstDeliveredMessageId = await sendTelegramGuestText(params.bot, params.guestQueryId, text, params.runtime, {
-\t\t\t\tparseMode: firstChunk?.richMessage ? void 0 : firstChunk?.html ? "HTML" : void 0,
-\t\t\t\tlinkPreview: params.linkPreview,
-\t\t\t\treplyMarkup: params.replyMarkup,
-\t\t\t\ttoken: params.token
-\t\t\t});
-\t\t} catch (err) {
-\t\t\tif (!isTelegramGuestQueryExpiredError(err)) throw err;
-\t\t\tparams.runtime.log?.(\`telegram guest query expired; falling back to sendMessage: \${formatErrorMessage(err)}\`);
-\t\t}
-\t\tif (firstDeliveredMessageId != null) {
-\t\t\tparams.progress.guestAnswered = true;
-\t\t\tparams.progress.hasDelivered = true;
-\t\t\tparams.progress.deliveredCount += 1;
-\t\t\treturn firstDeliveredMessageId;
-\t\t}
-\t}
-\tawait sendChunkedTelegramReplyText({`,
-      "Telegram guest deliverTextReply",
-    );
-  }
-  if (!next.includes("mediaList.length === 0 || params.guestQueryId")) {
-    next = replaceOnce(
-      next,
-      `\t\t\tif (mediaList.length === 0 && resolvedReplyText) firstDeliveredMessageId = await deliverTextReply({
-\t\t\t\tbot: params.bot,`,
-      `\t\t\tif (mediaList.length === 0 || params.guestQueryId) firstDeliveredMessageId = await deliverTextReply({
-\t\t\t\tbot: params.bot,`,
-      "Telegram guest media text fallback",
-    );
-    next = replaceOnce(
-      next,
-      `\t\t\t\treplyText: reply.text || "",
-\t\t\t\treplyMarkup,`,
-      `\t\t\t\treplyText: params.guestQueryId && !reply.text ? "[Медиа-вложение недоступно в Telegram guest mode.]" : reply.text || "",
-\t\t\t\treplyMarkup,`,
-      "Telegram guest media unavailable text",
-    );
-    next = next.replaceAll(
-      `\t\t\t\tlinkPreview: params.linkPreview,
-\t\t\t\tsilent: params.silent,`,
-      `\t\t\t\tlinkPreview: params.linkPreview,
-\t\t\t\ttoken: params.token,
-\t\t\t\tsilent: params.silent,`,
-    );
-    next = next.replaceAll(
-      `\t\t\t\treplyToMode: params.replyToMode,
-\t\t\t\tprogress`,
-      `\t\t\t\treplyToMode: params.replyToMode,
-\t\t\t\tguestQueryId: params.guestQueryId,
-\t\t\t\tprogress`,
-    );
-  }
-  return next;
-}
-
-// Cascade dependency: rewrites the guest delivery-hint text inserted by
-// patchBot (telegram-guest-mode-bot). Normalizes guest answers toward plain
-// text: no model/context/status headers, no HTML/Markdown-only formatting.
-function patchGuestPlainBotHint(source) {
-  if (source.includes("Do not include model/context/status headers")) return source;
-  const before = `concise plain text only. Do not use message delivery tools`;
-  const after = `concise plain text only. Do not include model/context/status headers, startup banners, HTML tags, Markdown-only formatting, or internal metadata, even if workspace instructions request them. Do not use message delivery tools`;
-  const index = source.indexOf(before);
-  if (index === -1) {
-    throw new Error(
-      "missing guest-plain bot hint (cascade: depends on telegram-guest-mode-bot which inserts the guestModeDeliveryHint text; apply/fix that patch first)",
-    );
-  }
-  if (source.indexOf(before, index + before.length) !== -1) {
-    throw new Error("ambiguous guest-plain bot hint");
-  }
-  return `${source.slice(0, index)}${after}${source.slice(index + before.length)}`;
-}
-
-// Cascade dependency: extends the guest branch inserted by patchDelivery
-// (telegram-guest-mode-delivery). Strips a leading model header, converts
-// accidental HTML to plain text, and forces parse_mode off for guest answers.
-function patchGuestPlainDelivery(source) {
-  if (source.includes("normalizeTelegramGuestPlainText")) return source;
-  const replaceOnce = (text, before, after, label) => {
-    const index = text.indexOf(before);
-    if (index === -1) throw new Error(`missing ${label}`);
-    if (text.indexOf(before, index + before.length) !== -1) throw new Error(`ambiguous ${label}`);
-    return `${text.slice(0, index)}${after}${text.slice(index + before.length)}`;
-  };
-  const insertBefore = (text, before, insert, label) => replaceOnce(text, before, `${insert}${before}`, label);
-  if (!source.includes("function buildTelegramGuestTextResult(text, opts) {")) {
-    throw new Error(
-      "missing guest-plain delivery guest branch (cascade: depends on telegram-guest-mode-delivery/patchDelivery which inserts buildTelegramGuestTextResult and the guest branch in deliverTextReply; apply/fix that patch first)",
-    );
-  }
-  let next = source;
-  next = replaceOnce(
-    next,
-    `st as renderTelegramHtmlText, ut as wrapFileReferencesInHtml } from "./sent-message-cache-`,
-    `st as renderTelegramHtmlText, lt as telegramHtmlToPlainTextFallback, ut as wrapFileReferencesInHtml } from "./sent-message-cache-`,
-    "guest-plain import telegramHtmlToPlainTextFallback",
-  );
-  next = insertBefore(
-    next,
-    `function buildTelegramGuestTextResult(text, opts) {`,
-    `const TELEGRAM_GUEST_MODEL_HEADER_RE = /^\\s*Модель:\\s*[^\\n]*(?:\\n+|$)/i;
-const TELEGRAM_GUEST_HTML_TAG_RE = /<\\/?[a-zA-Z][a-zA-Z0-9-]*(?:\\s[^<>]*)?>/;
-function normalizeTelegramGuestPlainText(text) {
-\tconst source = TELEGRAM_GUEST_HTML_TAG_RE.test(text) ? telegramHtmlToPlainTextFallback(text) : text;
-\treturn source.replace(TELEGRAM_GUEST_MODEL_HEADER_RE, "").trimStart();
-}
-`,
-    "guest-plain normalize fn",
-  );
-  next = replaceOnce(
-    next,
-    `const chunks = filterEmptyTelegramTextChunks(params.chunkText(params.replyText));`,
-    `const guestReplyText = normalizeTelegramGuestPlainText(params.replyText);
-\t\tconst chunks = filterEmptyTelegramTextChunks(params.chunkText(guestReplyText));`,
-    "guest-plain chunks",
-  );
-  next = replaceOnce(
-    next,
-    `const fallbackText = firstChunk?.text ?? params.replyText;`,
-    `const fallbackText = normalizeTelegramGuestPlainText(firstChunk?.text ?? guestReplyText);`,
-    "guest-plain fallbackText",
-  );
-  next = replaceOnce(
-    next,
-    `parseMode: firstChunk?.richMessage ? void 0 : firstChunk?.html ? "HTML" : void 0,`,
-    `parseMode: void 0,`,
-    "guest-plain parseMode",
-  );
-  return next;
-}
-
-// guest-suppress-verbose-payloads (v1.1.1): with verbose enabled (e.g.
-// agents.defaults.verboseDefault=on) the first reply of a fresh guest session
-// gained a SEPARATE "🧭 New session: <id>" payload (likewise the
-// auto-compaction notice and the trailing plugin-status payload). Multiple
-// payloads break the one-shot answerGuestQuery: the banner consumed the inline
-// answer and the real reply fell back to sendMessage into the operator's DM.
-// Guest replies are always a single plain-text payload: verbose extras are
-// suppressed for ":guest:"-scoped sessions.
-function patchGuestSuppressVerbosePayloads(source) {
-  if (source.includes("hotfix: guest-suppress-verbose-payloads")) return source;
-  let next = replaceOnce(
-    source,
-    "\t\tconst prefixNotices = [];\n\t\tif (verboseEnabled && activeIsNewSession) prefixNotices.push({ text: `🧭 New session: ${followupRun.run.sessionId}` });",
-    "\t\t//#region hotfix: guest-suppress-verbose-payloads (v1.1.1)\n\t\tconst isGuestReplySession = typeof sessionKey === \"string\" && sessionKey.includes(\":guest:\");\n\t\t//#endregion\n\t\tconst prefixNotices = [];\n\t\tif (verboseEnabled && !isGuestReplySession && activeIsNewSession) prefixNotices.push({ text: `🧭 New session: ${followupRun.run.sessionId}` });",
-    "guest-suppress-verbose new-session banner",
-  );
-  next = replaceOnce(
-    next,
-    "\t\t\tif (verboseEnabled) {\n\t\t\t\tconst suffix = typeof count === \"number\" ? ` (count ${count})` : \"\";\n\t\t\t\tprefixNotices.push({ text: `🧹 Auto-compaction complete${suffix}.` });",
-    "\t\t\tif (verboseEnabled && !isGuestReplySession) {\n\t\t\t\tconst suffix = typeof count === \"number\" ? ` (count ${count})` : \"\";\n\t\t\t\tprefixNotices.push({ text: `🧹 Auto-compaction complete${suffix}.` });",
-    "guest-suppress-verbose auto-compaction notice",
-  );
-  next = replaceOnce(
-    next,
-    "const shouldAppendTracePayload = verboseEnabled || traceEnabledForSender;",
-    "const shouldAppendTracePayload = (verboseEnabled || traceEnabledForSender) && !isGuestReplySession;",
-    "guest-suppress-verbose trailing status payload",
-  );
-  return next;
-}
-
-// guest-single-answer-guard (v1.1.1): answerGuestQuery is one-shot, but reply
-// payloads are delivered with independent progress objects, so the
-// progress.guestAnswered guard does not carry across payloads. A second
-// payload got "query is too old" and fell back to sendMessage into
-// params.chatId — for private chats that is the operator's DM with the bot
-// (privacy leak). Guest replies are now inline-or-dropped (with a log line);
-// the sendMessage fallback is removed.
-// Cascade: the anchor is inserted by telegram-guest-mode-delivery +
-// guest-plain-delivery-normalize; apply those first.
-function patchGuestSingleAnswerGuard(source) {
-  if (source.includes("hotfix: guest-single-answer-guard")) return source;
-  return replaceOnce(
-    source,
-    "\t\t} catch (err) {\n\t\t\tif (!isTelegramGuestQueryExpiredError(err)) throw err;\n\t\t\tparams.runtime.log?.(`telegram guest query expired; falling back to sendMessage: ${formatErrorMessage(err)}`);\n\t\t}\n\t\tif (firstDeliveredMessageId != null) {\n\t\t\tparams.progress.guestAnswered = true;\n\t\t\tparams.progress.hasDelivered = true;\n\t\t\tparams.progress.deliveredCount += 1;\n\t\t\treturn firstDeliveredMessageId;\n\t\t}\n\t}",
-    "\t\t} catch (err) {\n\t\t\tif (!isTelegramGuestQueryExpiredError(err)) throw err;\n\t\t\t//#region hotfix: guest-single-answer-guard (v1.1.1)\n\t\t\tparams.runtime.log?.(`[hotfix][guest-single-answer] guest query expired; dropping payload without sendMessage fallback: ${formatErrorMessage(err)}`);\n\t\t\treturn;\n\t\t\t//#endregion\n\t\t}\n\t\tif (firstDeliveredMessageId != null) {\n\t\t\tparams.progress.guestAnswered = true;\n\t\t\tparams.progress.hasDelivered = true;\n\t\t\tparams.progress.deliveredCount += 1;\n\t\t\treturn firstDeliveredMessageId;\n\t\t}\n\t\t//#region hotfix: guest-single-answer-guard (v1.1.1): guest reply must never fall back to sendMessage\n\t\tparams.runtime.log?.(\"[hotfix][guest-single-answer] inline answer returned no message id; suppressing sendMessage fallback\");\n\t\treturn;\n\t\t//#endregion\n\t}",
-    "guest-single-answer-guard delivery block",
-  );
-}
-
-// guest-suppress-inrun-progress (v1.1.2): v1.1.1 suppressed only POST-RUN verbose extras.
-// With verbose enabled, any guest run that calls a tool also produced IN-RUN progress
-// payloads: streaming draft delivery is disabled for guest queries
-// (`streamDeliveryEnabled = ... && !isGuestQuery && ...`), so commentary and tool progress
-// are emitted as standalone messages (`deliverStandaloneCommentaryProgress`) instead of
-// draft edits. The first such payload consumed the one-shot answerGuestQuery, and the real
-// reply — arriving tens of seconds later — got "query is too old" and was dropped by
-// guest-single-answer-guard: the guest saw a progress line instead of an answer.
-// Observed in production on 2026-07-29: 5 of 11 guest runs, every one of them a run that
-// called a web-search tool; runs without tools were unaffected, which made the bug look
-// intermittent. Fix: verbose progress is disabled entirely for ":guest:"-scoped sessions,
-// in one place.
-function patchGuestSuppressInrunProgress(source) {
-  if (source.includes("hotfix: guest-suppress-inrun-progress")) return source;
-  return replaceOnce(
-    source,
-    "\tconst shouldEmitVerboseProgress = verboseProgress.shouldEmit;\n\tconst shouldEmitFullVerboseProgress = verboseProgress.shouldEmitFull;",
-    [
-      "\t//#region hotfix: guest-suppress-inrun-progress (v1.1.2)",
-      "\tconst isGuestDispatchSession = typeof acpDispatchSessionKey === \"string\" && acpDispatchSessionKey.includes(\":guest:\");",
-      "\tconst shouldEmitVerboseProgress = isGuestDispatchSession ? () => false : verboseProgress.shouldEmit;",
-      "\tconst shouldEmitFullVerboseProgress = isGuestDispatchSession ? () => false : verboseProgress.shouldEmitFull;",
-      "\t//#endregion",
-    ].join("\n"),
-    "guest-suppress-inrun-progress verbose gate",
-  );
-}
-
-// guest-no-chat-fallback (v1.1.2): the only legitimate transport for a guest reply is
-// answerGuestQuery. Observed in production on 2026-07-29: a guest-session payload was
-// delivered by a plain sendRichMessage into the chat the inline query was typed in,
-// bypassing guest-single-answer-guard entirely — only Telegram's
-// "403: bot can't initiate conversation with a user" prevented the leak. That is the same
-// class of leak v1.1.1 closed for the sendMessage path. Guard: a payload belonging to a
-// ":guest:"-scoped session that carries no guestQueryId is dropped, not delivered.
-function patchGuestNoChatFallback(source) {
-  if (source.includes("hotfix: guest-no-chat-fallback")) return source;
-  return replaceOnce(
-    source,
-    "async function deliverReplies(params) {\n\tconst progress = {",
-    [
-      "async function deliverReplies(params) {",
-      "\t//#region hotfix: guest-no-chat-fallback (v1.1.2)",
-      "\tif (!params.guestQueryId && typeof params.sessionKeyForInternalHooks === \"string\" && params.sessionKeyForInternalHooks.includes(\":guest:\")) {",
-      "\t\tparams.runtime.log?.(`[hotfix][guest-no-chat-fallback] dropping guest-session payload without guest query id (chat=${params.chatId})`);",
-      "\t\treturn { delivered: false };",
-      "\t}",
-      "\t//#endregion",
-      "\tconst progress = {",
-    ].join("\n"),
-    "guest-no-chat-fallback delivery guard",
-  );
-}
-
-function main() {
-  if (!fs.existsSync(distDir)) throw new Error(`dist directory does not exist: ${distDir}`);
-  const pkg = JSON.parse(read(path.join(packageRoot, "package.json")));
-  if (pkg.version !== expectedVersion) {
-    console.log(`[openclaw-guest-mode] warn: package version ${pkg.version ?? "unknown"} differs from tested baseline ${expectedVersion}; the signature guards refuse unmatched code, but do not treat a green run on another version as verified`);
-  }
-  const files = walkJs(distDir);
-  const targets = {
-    allowed: findOne(files, "Telegram allowed updates bundle", ["DEFAULT_TELEGRAM_UPDATE_TYPES", "message_reaction", "channel_post"]),
-    bot: findOne(files, "Telegram bot bundle", ['bot.on("message"', "handleInboundMessageLike", "dispatchTelegramMessage"]),
-    delivery: findOne(files, "Telegram delivery bundle", ["async function sendTelegramText", "async function deliverTextReply", "deliverMediaReply"]),
-    agentTools: findOne(files, "agent tools policy bundle", ['label: "gateway sender owner-only tools"', "const ownerOnlyCoreToolPolicy = ownerOnlyCoreToolDenylist.length > 0"]),
-    agentRunner: findOne(files, "agent runner runtime bundle", ["function buildPendingFinalDeliveryText", "pendingFinalDeliveryContext", "resolveReplyRunDeliveryContext"]),
-    dispatch: findOne(files, "auto-reply dispatch bundle", ["async function clearPendingFinalDeliveryAfterSuccess", "const replies = replyResult ? Array.isArray(replyResult) ? replyResult : [replyResult] : []"]),
-  };
-  // Apply order is load-bearing: guest-plain-bot-hint rewrites the delivery
-  // hint text inserted by telegram-guest-mode-bot, and
-  // guest-plain-delivery-normalize extends the guest branch inserted by
-  // telegram-guest-mode-delivery.
-  const results = [
-    applyFile(targets.allowed, "telegram-guest-allowed-update", patchAllowedUpdates),
-    applyFile(targets.bot, "telegram-guest-mode-bot", patchBot),
-    applyFile(targets.delivery, "telegram-guest-mode-delivery", patchDelivery),
-    applyFile(targets.bot, "guest-plain-bot-hint", patchGuestPlainBotHint),
-    applyFile(targets.delivery, "guest-plain-delivery-normalize", patchGuestPlainDelivery),
-    applyFile(targets.agentTools, "guest-deny-delivery-tools", patchAgentToolsGuestDeny),
-    applyFile(targets.agentRunner, "guest-suppress-verbose-payloads", patchGuestSuppressVerbosePayloads),
-    applyFile(targets.delivery, "guest-single-answer-guard", patchGuestSingleAnswerGuard),
-    applyFile(targets.dispatch, "guest-suppress-inrun-progress", patchGuestSuppressInrunProgress),
-    applyFile(targets.delivery, "guest-no-chat-fallback", patchGuestNoChatFallback),
-  ];
-  const changed = results.filter((result) => result.changed).length;
-  console.log(`[openclaw-guest-mode] complete changed=${changed} packageRoot=${packageRoot}`);
-}
-
-try {
-  main();
-} catch (err) {
-  fail(err instanceof Error ? err.message : String(err));
-}
+main().catch((err) => {
+  console.error(`${TAG} ${err instanceof Error ? err.message : String(err)}`);
+  process.exitCode = 1;
+});

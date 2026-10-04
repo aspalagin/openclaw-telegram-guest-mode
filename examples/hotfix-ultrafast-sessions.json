@@ -1,0 +1,7 @@
+{
+  "_comment": "Optional module (--with-ultrafast). Which session keys use OpenAI service_tier=ultrafast by default. Hot-reloaded; enabled:false turns it off. sessionKeyIncludes = substring; sessionKeyPrefixes = key equals prefix or starts with '<prefix>:'; sessionKeys = exact keys. An explicit params.serviceTier of the run/model/agent always wins.",
+  "enabled": true,
+  "sessionKeyIncludes": [":guest:"],
+  "sessionKeyPrefixes": [],
+  "sessionKeys": []
+}

@@ -1,138 +1,103 @@
 # Hotfix notes
 
-Tested baseline: OpenClaw `2026.7.1-2`.
+Tested baseline: OpenClaw `2026.9.7` (grammy 1.46.0, Bot API 10.3 types).
 
-## Patch inventory and apply order
+## Module inventory and apply order
 
-The layer consists of ten guarded transformations across six dist bundles
-(v1.1.0 added per-chat guest session scope, guest prompt-context isolation, an
-honest inbound log line, and a tool-policy deny step in the agent tools bundle;
-v1.1.1 added single-payload delivery in the agent runner runtime; v1.1.2 added
-in-run progress suppression in the auto-reply dispatch bundle).
-Bundles are discovered by stable code signatures, never by file name.
+`lib/plan.mjs` maps a target key to an ordered module list. Chunks are located
+by content needles (`target.needles` in each module); the hashed chunk file
+names below are the 2026.9.7 names and are informational only.
 
-| # | Patch id | Bundle | Purpose |
+| Target key | Chunk (2026.9.7) | Modules (in order) | Version |
 | --- | --- | --- | --- |
-| 1 | `telegram-guest-allowed-update` | allowed updates | subscribe the poller to `guest_message` |
-| 2 | `telegram-guest-mode-bot` | Telegram bot | inbound handler, session isolation, delivery hint, context fields |
-| 3 | `telegram-guest-mode-delivery` | Telegram delivery | `answerGuestQuery` delivery with fallbacks |
-| 4 | `guest-plain-bot-hint` | Telegram bot | extended plain-text delivery hint |
-| 5 | `guest-plain-delivery-normalize` | Telegram delivery | plain-text normalization of guest answers |
-| 6 | `guest-deny-delivery-tools` | agent tools policy | deny `message` / `sessions_spawn` / `cron` / `gateway` / `nodes` in guest runs |
-| 7 | `guest-suppress-verbose-payloads` | agent runner runtime | suppress post-run verbose extras for guest sessions |
-| 8 | `guest-single-answer-guard` | Telegram delivery | guest replies are inline-or-dropped; no `sendMessage` fallback |
-| 9 | `guest-suppress-inrun-progress` | auto-reply dispatch | suppress in-run verbose progress for guest sessions |
-| 10 | `guest-no-chat-fallback` | Telegram delivery | drop guest-session payloads that carry no guest query id |
+| `telegram-ingress` | `transport-status-*.mjs` | `telegram-guest-mode-bot.1` | 9.7 re-anchor |
+| `telegram-bot-message` | `bot-message-*.mjs` | `telegram-guest-mode-bot.2`, `guest-plain-bot-hint` (v4), `guest-inbound-kind-user-request`, `guest-ack-edit-bot` (arm v2), `guest-session-per-chat`, `guest-context-isolation`, `guest-inbound-log-sender` | 2026-10-04 |
+| `telegram-delivery` | `delivery-*.mjs` | `telegram-guest-mode-delivery`, `guest-plain-delivery-normalize`, `guest-single-answer-guard`, `guest-no-chat-fallback`, `guest-ack-edit-delivery` (registry v3), `guest-media-staging-delivery` | 2026-10-04 |
+| `telegram-allowed-updates` | `allowed-updates-*.mjs` | `telegram-guest-allowed-update` (conditional) | n/a on grammy ≥ 1.46 |
+| `telegram-send` | `send-*.mjs` | `telegram-sent-media-file-ids` (v2, rich hook conditional) | 2026-10-04 |
+| `agent-tools` | `agent-tools-*.mjs` | `guest-deny-delivery-tools` (v3) | 2026-10-04 |
+| `agent-runner` | `agent-runner.runtime-*.mjs` | `guest-suppress-verbose-payloads` | 9.7 re-anchor |
+| `auto-reply-dispatch` | `dispatch-from-config-*.mjs` | `guest-suppress-inrun-progress` | unchanged |
+| `agent-command-delivery` | `delivery.runtime-*.mjs` | `guest-announce-final-inline` (v2) | 2026-10-04 |
+| `subagent-announce` | `subagent-announce-*.mjs` | `guest-announce-final-text-instruction` (v2) | 2026-10-04 |
+| `subagent-settle-wake` | `subagent-announce.requester-settle-wake-*.mjs` | `guest-announce-final-text-settle-wake` (v2) | 2026-10-04 |
+| `subagent-announce-delivery` | `subagent-announce-delivery-*.mjs` | `guest-announce-fallback-skip` (conditional) | 2026-10-04 |
+| `message-action-runner` | `message-action-runner-*.mjs` | `message-inbound-turn-kind-normalize`, `guest-media-staging-runner` (v3) | 2026-10-04 |
+| optional `openai-fast-mode` | `minimax-fast-mode-*.mjs` | `openai-ultrafast-tier.1` | 2026-09-29 |
+| optional `builtin-openclaw` | `builtin-openclaw-*.mjs` | `guest-ultrafast-service-tier` (v2) | 2026-10-01 |
+| optional `ai-openai-responses-params` | `node_modules/@openclaw/ai/dist/openai-responses-prompt-observer-internal-*.mjs` | `openai-ultrafast-tier.2` | 2026-09-29 |
 
-Patches 2 and 3 also carry the v1.1.0 privacy hardening (session scope, prompt
-isolation, inbound log line), which the checker validates as a separate
-`guest-privacy-hardening` signature.
+Cascades: modules that extend code inserted by an earlier module import and
+call that module's `patch()` first (`guest-plain-bot-hint`,
+`guest-inbound-kind-user-request`, `guest-session-per-chat` over
+`telegram-guest-mode-bot.2`; `guest-plain-delivery-normalize`,
+`guest-single-answer-guard` over `telegram-guest-mode-delivery`;
+`guest-ack-edit-delivery` over the whole delivery cascade;
+`guest-media-staging-delivery` over `guest-ack-edit-delivery`). The apply
+computes each target in memory, re-runs the whole cascade a second time
+(must be a no-op), runs every module's assertions on the result and
+`node --check`s it before anything is written. Older module revisions found on
+an already-patched install (v1/v2 of the registry, arm, deny list, hint,
+announce guard, staging runner) are recognized and upgraded in place.
 
-The order is load-bearing. Patch 4 rewrites the delivery-hint text that patch
-2 inserts, patch 5 extends the guest delivery branch that patch 3 inserts, and
-patch 8 rewrites the expired-query branch produced by 3 and 5; all fail with an
-explicit cascade error when their prerequisite is missing. The apply script
-always runs 2 before 4, 3 before 5, and 5 before 8, and its dry-run mode keeps
-transformations cumulative in memory so the cascade also holds without writing
-package files. Patches 9 and 10 are independent of that cascade — they anchor
-on unpatched upstream code.
+## Runtime model
 
-## Ingress (bot bundle)
+- **Registry** `globalThis.__openclawHotfixGuestAck` (delivery chunk) is shared
+  with the bot-message chunk (which imports delivery statically) and with core
+  chunks (`delivery.runtime`, `message-action-runner`) through `globalThis`;
+  no new chunk exports. Entry per guest query: `armed → inflight → placeholder
+  → answered` (or `claimed` when the final arrives before the placeholder,
+  `closed`/`failed`). `bySession` index serves late appends and media.
+- **arm** in `runTelegramDispatchTurn` right after `beginDeliveryCorrelation`,
+  **settle** in its `finally`; **claimFinal / markAnswered / appendToAnswered**
+  in the guest branch of `deliverTextReply`; **appendLater** at the head of
+  `deliverReplyPlan` before the no-chat-fallback guard; **appendBySession**
+  from `deliverAgentCommandResult` (core) before `if (!deliver)`;
+  **attachMediaBySession / stageAndAttachMedia / mediaRules** from
+  `executeMessageSend` (message action runner).
+- **Rules** are read with an mtime+size cache (one `statSync` per access).
+- **Rich**: `chunk.richMessage` of the planned page is sent as
+  `InputRichMessageContent`; edits use `editMessageText{rich_message}`; any
+  rich error → plain retry (the query is still unanswered / the edit not
+  applied). Media blocks are carried along in every later edit (wrapper over
+  `hotfixGuestAckEditInline`), otherwise the final would erase the attachment.
+- **Media**: `InputRichBlock{Photo,Video,Animation,Audio,VoiceNote}` with
+  `InputMedia{media: file_id}`; `InputRichBlockDocument` is rejected by Bot
+  API for inline messages in practice → `editMessageMedia` fallback
+  (`mediaReplaced` mode: text edits → `editMessageCaption` ≤ 1024).
+- **Sent-media registry** `globalThis.__openclawHotfixTelegramSentMedia`
+  (bounded Map, 300 entries) records the `file_id` of every outgoing Telegram
+  media message (`acceptMany` in the send chunk); the runner looks it up by
+  `chatId:messageId` from the send result (both the flat plugin form and the
+  core `{result:{chatId,messageId,receipt}}` form).
+- **Staging direct mode**: local files from a guest session are uploaded by
+  the registry itself (Bot API multipart `sendPhoto/Video/Animation/Audio/
+  Document`, 50 MB, photos ≤ 10 MB, document retry), bypassing the outbound
+  pipeline — a rich-enabled account embeds text+local media into a rich send
+  whose `file_id` would not reach the registry. The local-media allowlist
+  (`ctx.mediaAccess.localRoots`) is enforced by the runner. URLs and buffers
+  go through the regular pipeline and are picked up from `acceptMany`.
 
-- `guest_message` is added to the allowed update types next to
-  `message_reaction`, so long polling actually receives guest updates.
-- `bot.on("guest_message")` extracts the guest query, resolves the sender
-  from `from` or `guest_bot_caller_user`, and pushes a synthetic context
-  through `handleInboundMessageLike` — the same path as normal direct
-  messages, so dedupe and the `dmPolicy` / `allowFrom` authorization gate
-  apply unchanged.
-- The message-context header treats guest updates as direct chats (never
-  group), and disables the reaction API for guest turns.
-- `resolveTelegramGuestSessionKey` appends `:guest:<scope>` to the session
-  key. Scope preference: caller chat id, caller user id, guest query id;
-  normalized to lowercase `[a-z0-9_-]` and capped at 96 characters.
-- Typing and voice-recording cues are suppressed for guests; streaming
-  delivery and durable replay are disabled for guest queries (at-most-once
-  delivery by design).
-- The inbound context payload carries `GuestMode`, `GuestQueryId`,
-  `GuestBotCallerUserId`, and `GuestBotCallerChatId`, plus a delivery hint
-  instructing the agent to answer in concise plain text without delivery
-  tools, media, or reactions. The `guest-plain-bot-hint` patch extends this
-  hint to also forbid model/context/status headers, startup banners, HTML
-  tags, and Markdown-only formatting.
+## Diagnostics
 
-## Delivery (delivery bundle)
+Log tags: `[hotfix][guest-ack]` (placeholder/heartbeat/final/append/media),
+`[hotfix][guest-announce-final]` (sub-agent finals appended or dropped, empty
+payload diagnostic), `[hotfix][guest-media-staging]` (reroute, attach result),
+`[hotfix][guest-single-answer]`, `[hotfix][guest-no-chat-fallback]`,
+`[hotfix][telegram-sent-media]`, `[hotfix][guest-ultrafast]`. The inbound log
+line names the real caller: `telegram:<chatId> (guest query by <callerId>)`.
 
-- `buildTelegramGuestTextResult` wraps the reply into an `article` guest
-  result. Texts above the 4096-character guest limit are truncated with an
-  explicit marker appended.
-- `answerTelegramGuestQuery` tries `bot.api.answerGuestQuery`, then
-  `bot.api.raw.answerGuestQuery`, then a direct
-  `https://api.telegram.org/bot<token>/answerGuestQuery` HTTP call. The HTTP
-  fallback exists for self-hosted `telegram-bot-api` builds whose client
-  bindings do not expose the method; the bot token comes from delivery
-  options and is never logged.
-- `deliverTextReply` short-circuits for guest queries: at most one answer per
-  query (`progress.guestAnswered`), and multi-chunk replies collapse to the
-  first chunk plus the truncation marker.
-- Expired guest queries (`query is too old`, `response timeout expired`,
-  `query ID is invalid`) drop the payload with a
-  `[hotfix][guest-single-answer]` log line. There is deliberately no
-  `sendMessage` fallback (changed in v1.1.1): the fallback chat id is the chat
-  the query was typed in, which for private chats is the operator's own DM with
-  the bot.
-- A payload belonging to a `:guest:`-scoped session that carries no
-  `guestQueryId` never reaches the chat: `deliverReplies` drops it with a
-  `[hotfix][guest-no-chat-fallback]` log line (v1.1.2). This covers delivery
-  paths that do not run through the guest branch of `deliverTextReply` at all,
-  such as rich-message delivery.
-- Media replies for guests deliver the reply text when present, otherwise a
-  plain-text "media unavailable" placeholder.
-- `guest-plain-delivery-normalize` strips a leading model/startup header,
-  converts accidental HTML to plain text via the bundle's own HTML-to-plain
-  fallback, and forces `parse_mode` off for guest answers.
+A guest run whose answer reached the guest leaves a `channel-final` delivery
+mirror in the session transcript; no mirror means the answer never arrived.
 
-## Progress suppression (dispatch bundle)
+## Porting to another OpenClaw version
 
-`answerGuestQuery` is one-shot, so a guest turn must produce exactly one
-outbound payload. Two mechanisms would otherwise break that, and both were
-observed in production before being closed:
-
-- Post-run extras (new-session banner, auto-compaction notice, trailing
-  plugin-status payload) — suppressed in the agent runner runtime for
-  `:guest:`-scoped sessions (v1.1.1).
-- In-run progress (commentary, tool progress, tool summaries) — suppressed in
-  the dispatch bundle for the same sessions (v1.1.2). This matters
-  specifically because guest queries have streaming draft delivery disabled:
-  with no draft to edit, the runtime falls back to emitting progress as
-  standalone payloads, and the first one consumes the inline answer. The
-  failure therefore only appears on turns that actually call a tool, which
-  makes it look intermittent.
-
-Diagnostic: a guest turn whose answer reached the guest leaves a
-`channel-final` delivery mirror in the session transcript. No mirror means the
-answer never arrived, regardless of what the delivery logs report.
-
-## Inserted code must not rely on bundle-local imports
-
-Code that the patches insert into a bundle may only use globals and symbols
-the patch itself defines. Bundle-local imports (for example the
-`string-coerce` helpers) change between OpenClaw builds: v1.1.2 relied on
-`normalizeLowercaseStringOrEmpty` being imported by the bot-message bundle,
-and on a build that dropped that import every guest query failed at runtime
-with a `ReferenceError` from the ingress spool retry loop, with the checker
-still green. Neither `node --check` nor the checker catches this class of
-defect; only a live guest query does.
-
-## Verification mechanism
-
-The apply script discovers each target bundle by code signatures and refuses
-to patch when a bundle cannot be uniquely identified or a transformation
-anchor does not match; this is the expected safe outcome on any OpenClaw
-version other than `2026.7.1-2`. Every write is preceded by a per-file backup
-under the backup directory. The checker validates the applied signatures
-independently and exits non-zero when any of its eleven checks fails.
-Run the checker after every OpenClaw package update.
-
-This repository intentionally omits host-specific production notes, node ids,
-private paths, tokens, IP addresses, and operator chat ids.
+1. `node apply-guest-mode.mjs --dry-run --package-root <copy>` on a copy of the
+   new dist. Each failing entry names the module and the missing/ambiguous
+   anchor.
+2. Fix the anchor in `modules/<name>.mjs` (keep `check.assertions` honest:
+   they are the drift guards for the next upgrade), keep old-version anchors
+   where an in-place upgrade from a patched install is needed.
+3. Add the version to `TESTED_OPENCLAW_VERSIONS` in `lib/kit.mjs` only after a
+   live guest query, a long run (placeholder + final edit), a sub-agent final
+   and a file delivery have been observed on that version.

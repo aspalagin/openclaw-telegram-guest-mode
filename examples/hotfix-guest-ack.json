@@ -1,0 +1,14 @@
+{
+  "_comment": "Telegram Guest Mode rules (hot-reloaded). Place at $OPENCLAW_STATE_DIR/hotfix-guest-ack.json (default ~/.openclaw of the gateway user) or point OPENCLAW_HOTFIX_GUEST_ACK_FILE at it. enabled:false restores the v1.1.x behaviour (single answerGuestQuery, no placeholder/edit/append/media). mediaStagingChatId must be set before guests can receive files (a chat the bot can post to; a copy of each file stays there).",
+  "enabled": true,
+  "ackAfterSeconds": 45,
+  "placeholderText": "Принял, работаю…",
+  "etaText": "",
+  "progress": { "enabled": true, "minIntervalSeconds": 15 },
+  "rich": { "enabled": true },
+  "appendLater": true,
+  "appendMax": 5,
+  "retentionMinutes": 360,
+  "mediaStagingChatId": "",
+  "media": { "enabled": true, "maxBlocks": 10 }
+}
