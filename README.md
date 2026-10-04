@@ -2,7 +2,7 @@
 
 Portable patch layer that adds Telegram Bot API guest-query support
 (`supports_guest_queries` / `guest_message` / `answerGuestQuery`, Bot API 10.3)
-to OpenClaw. Version 1.2.0 targets OpenClaw `2026.9.7`.
+to OpenClaw. Version 1.2.1 targets OpenClaw `2026.9.7`.
 
 This repository is an operator patch, not an upstream OpenClaw release. It
 patches built `dist/*.mjs` bundles in an installed OpenClaw package, so review
@@ -19,7 +19,8 @@ it before running it on a production host.
   shared history between two chats of the same caller. The owner's session
   transcript is never injected into a guest prompt.
 - **One answer per query, edited in place.** The reply is delivered through
-  `answerGuestQuery` (3-step call fallback down to a direct Bot API HTTP call).
+  `answerGuestQuery` (`bot.api` → `bot.api.raw` → direct Bot API HTTP call
+  against the bot's configured `apiRoot`).
   Long runs no longer time out: after `ackAfterSeconds` a placeholder is
   answered, a heartbeat edits it with the elapsed time, and the final reply is
   written into the same inline message with `editMessageText` by
@@ -56,8 +57,10 @@ it before running it on a production host.
 
 ## Status
 
-In production since 2026-06-13 on two bots; the 1.2.0 feature set has been in
-production on OpenClaw 2026.9.7 since 2026-10-04.
+The author's private patch layer, from which this kit is extracted, has been
+in production since 2026-06-13 on two bots; the kit itself exists since v1.0.0
+(2026-07-19), and the 1.2.x feature set has been in production on OpenClaw
+2026.9.7 since 2026-10-04.
 
 Upstream, the feature is discussed in openclaw/openclaw#79077. Until an
 upstream implementation lands, this repository maintains the feature as a
@@ -70,7 +73,9 @@ apply-guest-mode.mjs     apply (all-or-nothing, dry-run, backups, idempotent, up
 check-guest-mode.mjs     signature checker (markers, anchors, drift guards)
 lib/plan.mjs             target key → ordered module list
 lib/kit.mjs              CLI options, content-based chunk locator, module contract
+lib/patch-helpers.mjs    string helpers shared by the modules (replaceOnce, replaceRegion, assertions)
 modules/*.mjs            one file per transformation (label, target needles, patch(), check assertions)
+scripts/check-syntax.mjs node --check over every kit file (npm run check:syntax, cross-platform)
 examples/                sample rules files
 ```
 
@@ -88,11 +93,22 @@ npm run check:syntax
 ```
 
 Dry-run against the installed package (nothing is written; cascades are
-computed in memory, syntax-checked and asserted):
+computed in memory, syntax-checked and asserted). `--check` is a synonym of
+`--dry-run`; `--json` prints a machine-readable report after the log lines:
 
 ```bash
 OPENCLAW_PACKAGE_ROOT=/usr/lib/node_modules/openclaw node apply-guest-mode.mjs --dry-run
+OPENCLAW_PACKAGE_ROOT=/usr/lib/node_modules/openclaw node apply-guest-mode.mjs --check --json
 ```
+
+Options of `apply-guest-mode.mjs`: `--dry-run` | `--check`, `--package-root <dir>`
+(or `OPENCLAW_PACKAGE_ROOT`), `--backup-dir <dir>` (or
+`OPENCLAW_HOTFIX_BACKUP_DIR`), `--with-ultrafast` (or
+`OPENCLAW_GUEST_MODE_ULTRAFAST=1`), `--allow-untested` (or
+`OPENCLAW_GUEST_MODE_ALLOW_UNTESTED=1`), `--json`, `--help`. Unknown options,
+missing option values and stray arguments are rejected with usage and exit
+code 2. `check-guest-mode.mjs` accepts `--package-root`, `--with-ultrafast`,
+`--json`, `--help`.
 
 Apply (per-file backups under `./backups/<timestamp>/` or
 `OPENCLAW_HOTFIX_BACKUP_DIR`):
@@ -111,17 +127,23 @@ OPENCLAW_PACKAGE_ROOT=/usr/lib/node_modules/openclaw node check-guest-mode.mjs
 sudo systemctl restart openclaw-gateway
 ```
 
-Re-running apply reports `status=unchanged changed=0`. Two modules are
+Re-running apply reports `status=unchanged changed=0`; an install patched by
+an earlier kit version (v1.1.x, v1.2.0) is upgraded in place. Two modules are
 conditional and report `n/a` when they do not apply to your build:
-`telegram-guest-allowed-update` (grammy ≥ 1.46 already subscribes to
-`guest_message`) and `guest-announce-fallback-skip` (only relevant when a
+`telegram-guest-allowed-update` (applied only when `DEFAULT_UPDATE_TYPES` of
+the installed grammy lacks `guest_message`; grammy 1.46 pinned by 2026.9.7
+already lists it) and `guest-announce-fallback-skip` (only relevant when a
 separate "silent completion fallback" hotfix is installed).
 
 > **This patches the installed dist.** Any OpenClaw update reverts the patched
 > bundles: re-run apply and check after every update. The anchors are pinned
-> to OpenClaw `2026.9.7`. On another version the apply refuses unmatched code
-> (every entry fails before anything is written); expect to adapt anchors in
-> `modules/*.mjs` and re-test before use.
+> to OpenClaw `2026.9.7` (`TESTED_OPENCLAW_VERSIONS` in `lib/kit.mjs`). On any
+> other version the apply **refuses to run** (`status=refused`, nothing
+> written) unless `--allow-untested` is given; with the flag, unmatched anchors
+> still fail the whole run before anything is written, but matching anchors on
+> another version are not a verified port — test on a copy and follow
+> HOTFIX_NOTES.md "Porting" before using it on a live host. The checker only
+> warns about an untested version.
 
 ## Configuration
 
@@ -150,17 +172,58 @@ log warning. See `examples/hotfix-guest-ack.json`.
 | --- | --- | --- |
 | `enabled` | `true` | `false` disables placeholder/edit/append/media entirely (one `answerGuestQuery`, as in v1.1.x) |
 | `ackAfterSeconds` | `45` (3–600) | when to answer the placeholder if the run has not finished |
-| `placeholderText`, `etaText` | `"Принял, работаю…"`, `""` | placeholder text (and optional suffix) |
-| `progress.enabled`, `progress.minIntervalSeconds` | `true`, `15` (10–600) | heartbeat edits "⏱ N мин M с"; interval grows to 60 s on long runs |
+| `placeholderText`, `etaText` | `"Working on it…"`, `""` | placeholder text (and optional suffix) |
+| `progress.enabled`, `progress.minIntervalSeconds` | `true`, `15` (10–600) | heartbeat edits "⏱ Nm Ms"; interval grows to 60 s on long runs |
+| `truncatedNote` | `"[Reply truncated: Telegram guest mode limit.]"` | appended when a reply or an appended document had to be trimmed to 4096 characters |
+| `settleFailedText`, `settleEmptyText` | `"⚠️ The request could not be processed. Please try again."`, `"The request was processed but produced no text reply. Please rephrase it."` | service text written into the placeholder when the run fails / yields no text |
 | `rich.enabled` | `true` | rich replies/edits; plain-text retry on any rich error |
 | `appendLater`, `appendMax` | `true`, `5` (0–50) | late payloads of the same guest session (sub-agent finals) are appended to the answered message |
 | `retentionMinutes` | `360` (1–2880) | how long an answered `inline_message_id` is remembered |
-| `mediaStagingChatId` | *(empty = media disabled)* | chat id or `@username` the bot can post to; files for guests are uploaded there first |
+| `mediaStagingChatId` (alias `media.stagingChatId`) | *(empty = media disabled)* | chat id or `@username` the bot can post to; files for guests are uploaded there first |
 | `media.enabled`, `media.maxBlocks` | `true`, `10` (1–20) | guest media delivery switch and attachments per guest message |
+
+All user-facing strings default to English; `examples/hotfix-guest-ack.json`
+shows the Russian set. One marker is fixed: when a single indivisible Markdown
+block is longer than 4096 characters it is cut by characters with the English
+`[Reply truncated: Telegram guest mode limit.]` (base helper of the delivery
+cascade, not rules-driven).
 
 The kit ships **no default staging chat**: set `mediaStagingChatId` (typically
 the owner's DM with the bot, or a private service channel) before guests can
 receive files. A copy of every file sent to a guest stays in that chat.
+
+#### Guest media: limits and transport
+
+- Local files (absolute path or `file://`) are uploaded **directly** by the
+  kit: `fs.realpathSync` first, then the canonical path must lie inside one of
+  the local media roots the message tool already enforces
+  (`ctx.mediaAccess.localRoots`, fail-closed: no roots → every local file is
+  denied; a symlink pointing outside the roots is denied). URLs and buffers go
+  through the regular outbound pipeline and the `file_id` is picked up from
+  the send result.
+- Direct uploads: 50 MB per file; photos (jpeg/png/webp) ≤ 10 MB go as
+  `sendPhoto`, gif → `sendAnimation`, `video/*` → `sendVideo`, `audio/*` →
+  `sendAudio`, everything else (and `asDocument: true`) → `sendDocument`; a
+  rejected photo/video/animation/audio upload is retried once as a document.
+  MIME by extension: jpg/jpeg/png/webp/gif/heic/bmp, mp4/mov/webm/mkv,
+  mp3/m4a/aac/ogg/oga/opus/wav/flac, pdf/md/txt/csv/json/html,
+  docx/xlsx/pptx/zip; unknown → `application/octet-stream` (an explicit
+  `contentType`/`mimeType` param wins).
+- Uploads go through the bot's own grammy client (`bot.api.raw.sendX` with a
+  grammy `InputFile`): the configured `channels.telegram.apiRoot`, proxy and
+  per-account throttler all apply. Only when the bot object has no raw API, or
+  grammy cannot be loaded, the kit falls back to a direct multipart HTTP call
+  against the configured `apiRoot` (default `https://api.telegram.org`); the
+  same `apiRoot` rule holds for every other HTTP fallback of the kit
+  (`answerGuestQuery`, `editMessageText`, `editMessageMedia`,
+  `editMessageCaption`).
+- What the model sees: `payload.guestMediaDelivery = { delivered, mode,
+  guestChatId, items: [{ fileName, delivered, mode, kind, size, reason }],
+  note }`. The staging chat id and the Telegram `file_id` are not part of it;
+  the standard send result (`to`, `messageId`) still names the staging chat,
+  as for any send. Gateway log lines (`[hotfix][guest-media-staging]`,
+  `[hotfix][guest-ack]`) print file names and sizes, never full paths or
+  `file_id`s; the bot token is never logged.
 
 ### Ultrafast rules file (optional module)
 
@@ -218,8 +281,9 @@ params always wins. The set also patches `normalizeOpenAIServiceTier` to accept
 - **No rate limiting; no config toggle.** Applying the kit enables the
   feature; disable behaviour via the rules file (`enabled: false`) or roll
   back the bundles.
-- Fallback strings (placeholder, truncation marker, settle texts) are in
-  Russian; edit them in the rules file or in `modules/guest-ack-edit-delivery.mjs`.
+- **Rules file is the only i18n.** Placeholder, truncation note and settle
+  texts come from the rules file (English defaults); the inline-result title
+  and the character-level truncation marker are fixed English strings.
 - **Code-mode tool catalog.** In code-mode sandboxes `catalog.search('message')`
   does not find directly visible tools; the guest hint tells the model to call
   the `message` global directly.

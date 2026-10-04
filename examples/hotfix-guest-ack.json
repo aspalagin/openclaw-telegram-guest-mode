@@ -1,5 +1,5 @@
 {
-  "_comment": "Telegram Guest Mode rules (hot-reloaded). Place at $OPENCLAW_STATE_DIR/hotfix-guest-ack.json (default ~/.openclaw of the gateway user) or point OPENCLAW_HOTFIX_GUEST_ACK_FILE at it. enabled:false restores the v1.1.x behaviour (single answerGuestQuery, no placeholder/edit/append/media). mediaStagingChatId must be set before guests can receive files (a chat the bot can post to; a copy of each file stays there).",
+  "_comment": "Telegram Guest Mode rules (hot-reloaded). Place at $OPENCLAW_STATE_DIR/hotfix-guest-ack.json (default ~/.openclaw of the gateway user) or point OPENCLAW_HOTFIX_GUEST_ACK_FILE at it. enabled:false restores the v1.1.x behaviour (single answerGuestQuery, no placeholder/edit/append/media). mediaStagingChatId must be set before guests can receive files (a chat the bot can post to; a copy of each file stays there). The built-in defaults of placeholderText, truncatedNote, settleFailedText and settleEmptyText are English; this example shows a Russian set — translate or drop the keys as needed.",
   "enabled": true,
   "ackAfterSeconds": 45,
   "placeholderText": "Принял, работаю…",
@@ -9,6 +9,9 @@
   "appendLater": true,
   "appendMax": 5,
   "retentionMinutes": 360,
+  "truncatedNote": "[Ответ обрезан из-за лимита Telegram guest mode.]",
+  "settleFailedText": "⚠️ Не удалось обработать запрос. Попробуйте ещё раз.",
+  "settleEmptyText": "Запрос обработан, но текстового ответа не получилось. Попробуйте переформулировать.",
   "mediaStagingChatId": "",
   "media": { "enabled": true, "maxBlocks": 10 }
 }

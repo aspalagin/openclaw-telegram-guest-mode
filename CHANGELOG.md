@@ -1,5 +1,70 @@
 # Changelog
 
+## v1.2.1 - 2026-10-04
+
+Patch release after an external review of v1.2.0: privacy and portability
+clean-up, two security fixes, stricter tooling. No change in runtime behaviour
+beyond the items below; a v1.2.0 install is upgraded in place.
+
+Security:
+
+- **Local media allowlist on the canonical path** (`guest-media-staging-runner`
+  v4): local files sent to a guest are resolved with `fs.realpathSync` before
+  the `localRoots` check, so a symlink inside an allowed root that points
+  outside it is denied (fail-closed, realpath failure = denied); the realpath
+  is what gets uploaded. The checker asserts the realpath call.
+- **Configured `apiRoot` honoured everywhere** (`telegram-guest-mode-delivery`,
+  `guest-ack-edit-delivery` v4, `guest-media-staging-delivery` v4): direct
+  staging uploads go through the bot's own grammy client
+  (`bot.api.raw.sendX` + grammy `InputFile`, lazily imported), so a local Bot
+  API server, proxy and the account throttler apply; every HTTP fallback of
+  the kit (`answerGuestQuery`, `editMessageText`, `editMessageMedia`,
+  `editMessageCaption`, multipart) now targets `bot.clientConfig.apiRoot`
+  instead of a hard-coded `https://api.telegram.org`.
+
+Privacy / hygiene:
+
+- Comments of all modules rewritten in English without the author's chat ids,
+  session keys, host paths and references to private incident reports; the
+  assertion that guarded against a hard-coded staging chat id is a pattern,
+  not a literal id.
+- `guestMediaDelivery` no longer exposes the staging chat id, file paths or
+  `file_id`s to the model (`items[].fileName`, kind, size, reason only); the
+  note says "the operator's staging chat"; log lines print a `name:mode`
+  summary instead of the item dump.
+- `rulesFileExpression` no longer falls back to `/root` (HOME, else
+  USERPROFILE, else empty).
+
+Strings:
+
+- User-facing defaults are English; `truncatedNote`, `settleFailedText`,
+  `settleEmptyText` are new rules keys (next to `placeholderText`); the
+  Russian set lives in `examples/hotfix-guest-ack.json`. Elapsed time in the
+  heartbeat is `Nm Ss`; the inline result title is `Reply`.
+
+Tooling:
+
+- Version gate: an OpenClaw version outside `TESTED_OPENCLAW_VERSIONS` is
+  refused (`status=refused`, exit 1, nothing computed) unless
+  `--allow-untested` / `OPENCLAW_GUEST_MODE_ALLOW_UNTESTED=1` is given.
+- `complete status=failed changed=0 (nothing written)`; entries whose modules
+  are all conditional print `(n/a)` instead of `(already applied)`.
+- Strict CLI parsing: unknown options, missing option values and stray
+  arguments → usage, exit 2 (`--package-root` without a value no longer throws
+  a stack trace); each command has its own option set.
+- `lib/patch-helpers.mjs`: shared `replaceRegion` (region upsert with an
+  ambiguity check, used by every region-owning module), `countExactly`; the
+  modules use the exported `count`. The unused `verdict` export and
+  `check.gate` field are removed from the module contract.
+- `package.json`: `files`, `keywords`, `author`; `check:syntax` is a Node
+  script (`scripts/check-syntax.mjs`, works on Windows).
+- Tags `v1.0.0` and `v1.1.3` added retroactively for the existing commits.
+
+Docs: README covers `--json`, `--check`, the env switches, the version gate,
+media limits and MIME table, `media.stagingChatId`, the apiRoot/transport and
+logging notes, the conditional-module wording; HOTFIX_NOTES covers realpath
+and the upload transport.
+
 ## v1.2.0 - 2026-10-04
 
 Re-port to OpenClaw `2026.9.7` plus the Guest Mode work of 2026-10-04. The kit
