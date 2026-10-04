@@ -1,39 +1,36 @@
-// Port-модуль метки guest-deny-delivery-tools (target=agentTools). Переякорено под 2026.9.5, затем под 2026.9.7.
-import { replaceOnce, contains, notContains } from "../lib/patch-helpers.mjs";
+// Module guest-deny-delivery-tools (agent tools policy bundle). Tool policy for ":guest:" sessions.
+// OpenClaw 2026.9.5 moved the tool policy assembly (applyToolPolicyPipeline + buildConversationToolPolicyPipelineSteps with
+// the owner-only step) out of createOpenClawCodingToolsInternal into the helper createEmbeddedMessageInvocationPolicy(params)
+// .filter() in the same agent-tools chunk. filter() yields the final tool set of the run (subagentFiltered =
+// messageInvocationPolicy.filter()) and is reused by the scheduled-message admission check. `options` is not reachable
+// inside the helper, so: (1) the call site forwards guestSessionKey: options?.sessionKey and guestRunId: options?.runId;
+// (2) additionalStepsAfterSandbox of the helper gets the guest deny step by spread.
+// Deny list v3: ["gateway"] always for guest sessions; ["gateway", "message"] for runs whose runId starts with "announce:"
+// (sub-agent announce/settle completion turns: their final must be TEXT, which guest-ack-edit / guest-announce-final-inline
+// edit into the guest's inline message; a messaging tool there would send the result to the chat on the session record).
+// In regular interactive guest turns `message` stays available (explicit sends on the guest's request). runId reaches
+// the call site as options?.runId (buildConversationContext in builtin-openclaw passes runId: attempt.runId); without a
+// runId (other callers of createOpenClawCodingTools) the deny list is ["gateway"]. The final tool set goes through the
+// same filter(), and the code-mode catalog (compactTools → catalog) is built from the filtered set, so `message`
+// disappears from catalog.search/exec as well. Earlier deny lists (v1: message/sessions_spawn/cron/gateway/nodes, v2:
+// gateway only) are upgraded in place.
+// 2026.9.7: (a) the owner-only denylist moved into prepareSessionPortalToolAccess() (session-portal-target.ts), the call
+// site createEmbeddedMessageInvocationPolicy({ … ownerOnlyCoreToolPolicy, catalog … }) is unchanged; (b) pipeline steps got a
+// `source` field (tool-access diagnostics) — the owner-only step is `{ policy, source: { kind: "session" }, label, … }`,
+// so the step anchor includes `source` and the guest step carries the same `source: { kind: "session" }` ("Denied by
+// guest session tools.deny" with kind=session). filter() got a second parameter onFilter — the guest step runs inside the
+// same applyToolPolicyPipeline and shows up in onFilter/audit. Deny semantics unchanged.
+import { replaceOnce, contains, notContains, count } from "../lib/patch-helpers.mjs";
 export const label = "guest-deny-delivery-tools";
-export const verdict = "port";
 export const target = {
- "key": "agentTools",
- "label": "agent tools policy bundle",
- "needles": [
-  "label: \"gateway sender owner-only tools\"",
-  "function createEmbeddedMessageInvocationPolicy(params)",
-  "const messageInvocationPolicy = createEmbeddedMessageInvocationPolicy({"
- ]
+  key: "agentTools",
+  label: "agent tools policy bundle",
+  needles: [
+    "label: \"gateway sender owner-only tools\"",
+    "function createEmbeddedMessageInvocationPolicy(params)",
+    "const messageInvocationPolicy = createEmbeddedMessageInvocationPolicy({",
+  ],
 };
-// ---- патч под 2026.9.5 ----
-// 2026.9.5 (upstream e3e3a349b90, #150166, src/agents/scheduled-message-invocation.ts): сборка политики инструментов
-// (applyToolPolicyPipeline + buildConversationToolPolicyPipelineSteps с шагом owner-only) вынесена из тела
-// createOpenClawCodingToolsInternal в хелпер createEmbeddedMessageInvocationPolicy(params).filter() — тот же чанк agent-tools-*.
-// filter() даёт итоговый набор инструментов рана (subagentFiltered = messageInvocationPolicy.filter()) и переиспользуется
-// admission-проверкой scheduled message. `options` внутри хелпера недоступен, поэтому:
-//   1) на месте вызова прокидываем guestSessionKey: options?.sessionKey (ровно то, что проверял патч 9.4);
-//   2) в additionalStepsAfterSandbox хелпера добавляем гостевой deny-шаг spread'ом (как в 9.4).
-// 2026-10-04 (v2, вместе с guest-ack-edit): deny-список сокращён до ["gateway"]. Гость снова может пользоваться
-// message/sessions_spawn/cron/nodes (например, фото с телефона через nodes; доставка медиа в сам guest-чат — отдельный пробел).
-// Утечки финала в чужой чат по-прежнему закрывают guest-no-chat-fallback / guest-single-answer-guard
-// на уровне доставки. Апгрейд v1 → v2 на уже пропатченном чанке: замена строки deny-списка.
-// 2026-10-04 (v3): completion-ход субагента в guest-сессии (settle-wake
-// `announce:requester-settle:…`, прямой announce `announce:<id>`) получал тот же набор инструментов, что обычный ход гостя, и штатная
-// completion-инструкция велела доставить итог messaging-инструментом → `message` ушёл в корень DM владельца (chatId из ключа сессии).
-// Для таких ходов финал должен быть ТЕКСТОМ (его дописывает в inline-сообщение гостя guest-ack-edit / guest-announce-final-inline),
-// поэтому deny расширяется до ["gateway", "message"] ровно для ранов с runId `announce:` (единый префикс completion-ходов:
-// announce-idempotency ANNOUNCE_IDEMPOTENCY_KEY_PREFIX; agent-turn-service проверяет `runId.startsWith("announce:")` и для
-// subagent_announce, и для subagent_settle). В обычных интерактивных guest-ходах `message` остаётся открыт (явные отправки по просьбе
-// гостя). runId приходит на место вызова как options?.runId (buildConversationContext в builtin-openclaw: runId: attempt.runId);
-// без runId (другие вызывающие createOpenClawCodingTools) — прежний deny ["gateway"]. Так как итоговый набор инструментов идёт через
-// тот же filter(), а code-mode каталог (compactTools → catalog) строится из уже отфильтрованного набора, `message` исчезает и из
-// catalog.search/exec-проекции. Апгрейд v2 → v3 на пропатченном чанке: замена строки deny + вторая строка на месте вызова.
 const DENY_OLD = "policy: { deny: [\"message\", \"sessions_spawn\", \"cron\", \"gateway\", \"nodes\"] },";
 const DENY_V2 = "policy: { deny: [\"gateway\"] }, // hotfix: guest-deny-delivery-tools v2 (2026-10-04: только gateway)";
 const DENY_NEW = "policy: { deny: typeof params.guestRunId === \"string\" && params.guestRunId.startsWith(\"announce:\") ? [\"gateway\", \"message\"] : [\"gateway\"] }, // hotfix: guest-deny-delivery-tools v3 (2026-10-04: gateway always; message denied in subagent announce/settle completion turns — the final text is edited into the guest inline message)";
@@ -84,31 +81,21 @@ function patchGuestDenyDeliveryTools(source) {
   );
   return out;
 }
-// 2026.9.7: (a) owner-only denylist вынесен в prepareSessionPortalToolAccess() (src/agents/tools/session-portal-target.ts,
-// upstream c7bab50e6e #156373 / dc0874047c #160296: "portal"/"sessions" больше не режутся non-owner'у при наличии
-// session-портала / operator.write-авторитета) — needle `const ownerOnlyCoreToolPolicy = ownerOnlyCoreToolDenylist.length > 0`
-// исчез (отсюда LOCATE-FAIL); место вызова createEmbeddedMessageInvocationPolicy({ … ownerOnlyCoreToolPolicy, catalog … })
-// не изменилось. (b) upstream 163cd10bfa (#157014, "explain terminal access restrictions") добавил шагам пайплайна поле
-// `source` (атрибуция в tool-access-diagnostics) — owner-only шаг теперь `{ policy, source: { kind: "session" }, label, … }`,
-// поэтому якорь шага расширен на `source`, и гостевой шаг получает тот же `source: { kind: "session" }` (объяснение
-// «Denied by guest session tools.deny» с kind=session вместо безымянного deny). filter() получил 2-й параметр onFilter —
-// гостевой шаг идёт внутри того же applyToolPolicyPipeline, т.е. попадает и в onFilter/аудит. Семантика deny не менялась.
-// ---- /патч ----
 export function patch(source) { return patchGuestDenyDeliveryTools(source); }
-export const check = { gate: "required", assertions: [
-      contains("hotfix: guest-deny-delivery-tools", "guest deny marker"),
-      contains("label: \"guest session tools.deny\"", "guest deny step label"),
-      contains("params.guestSessionKey.includes(\":guest:\")", "guest session gate"),
-      contains(CALLSITE_SESSION, "guest session key call-site wiring"),
-      contains(CALLSITE_RUNID, "guest run id call-site wiring (v3)"),
-      contains(DENY_NEW, "guest deny list v3 (gateway; + message on announce: runs)"),
-      notContains(DENY_OLD, "остаток deny-списка v1 (message/sessions_spawn/cron/nodes)"),
-      notContains(DENY_V2, "остаток deny-списка v2 (только gateway)"),
-      // runId должен реально приходить в options сборки инструментов (buildConversationContext в builtin-openclaw передаёт runId: attempt.runId;
-      // здесь проверяем, что в этом чанке options?.runId используется и помимо нас — т.е. поле контракта options живо)
-      (src) => (src.split("options?.runId").length - 1) >= 2 ? null : "options?.runId используется только нашей строкой (контракт options.runId в agent-tools исчез?)",
-      // дрейф: итоговый набор инструментов рана должен идти через тот же filter(), куда встроен гостевой шаг
-      contains("const subagentFiltered = messageInvocationPolicy.filter(", "run tool set built by messageInvocationPolicy.filter (drift: new bypass path?)"),
-      (src) => (src.split("additionalStepsAfterSandbox:").length - 1) === 1 ? null : "expected exactly one additionalStepsAfterSandbox pipeline in agent-tools (drift: second policy pipeline bypasses guest deny?)",
-      (src) => (src.split("guestRunId").length - 1) === 3 ? null : `guestRunId ожидался ровно 3 раза (call site + typeof/startsWith в deny step), найдено ${src.split("guestRunId").length - 1}`,
-    ] };
+export const check = { assertions: [
+  contains("hotfix: guest-deny-delivery-tools", "guest deny marker"),
+  contains("label: \"guest session tools.deny\"", "guest deny step label"),
+  contains("params.guestSessionKey.includes(\":guest:\")", "guest session gate"),
+  contains(CALLSITE_SESSION, "guest session key call-site wiring"),
+  contains(CALLSITE_RUNID, "guest run id call-site wiring (v3)"),
+  contains(DENY_NEW, "guest deny list v3 (gateway; + message on announce: runs)"),
+  notContains(DENY_OLD, "deny list v1 remnant (message/sessions_spawn/cron/nodes)"),
+  notContains(DENY_V2, "deny list v2 remnant (gateway only)"),
+  // runId must really reach the tool assembly options (buildConversationContext in builtin-openclaw passes runId: attempt.runId);
+  // here we check that options?.runId is used in this chunk beyond our line, i.e. the options.runId contract is alive
+  (src) => count(src, "options?.runId") >= 2 ? null : "options?.runId used only by our line (did the options.runId contract in agent-tools disappear?)",
+  // drift: the final tool set of the run must go through the same filter() that carries the guest step
+  contains("const subagentFiltered = messageInvocationPolicy.filter(", "run tool set built by messageInvocationPolicy.filter (drift: new bypass path?)"),
+  (src) => count(src, "additionalStepsAfterSandbox:") === 1 ? null : "expected exactly one additionalStepsAfterSandbox pipeline in agent-tools (drift: second policy pipeline bypasses guest deny?)",
+  (src) => count(src, "guestRunId") === 3 ? null : `guestRunId expected exactly 3 times (call site + typeof/startsWith in the deny step), found ${count(src, "guestRunId")}`,
+] };

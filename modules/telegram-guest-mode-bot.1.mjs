@@ -1,12 +1,11 @@
-// Rewrite-модуль метки telegram-guest-mode-bot, часть 1/2: регистрация guest_message в telegram-ingress-drain-factory (2026.9.1)
-// 9.7 (30.09.2026): чанк telegram-ingress-drain-factory-* слит в transport-status-*.mjs (тот же createTelegramInboundHandlers).
-// Апстрим (#158164 88d655629ca / #160032 16d6d16c634) склеил handleEditedChannelPost в handleEditedMessage(ctx, kind) —
-// якорь вставки переведён на новую сигнатуру `handleEditedMessage = async (ctx, kind) =>` (старая оставлена для 9.6).
-// Семантика обработчика guest_message не менялась: handleInboundMessageLike по-прежнему берёт isForum из event,
-// messageThreadId в event 9.7 уже не читается (безвреден, оставлен для идентичности с продом 9.6).
+// Module telegram-guest-mode-bot, part 1/2: guest_message registration in the Telegram ingress drain-factory.
+// OpenClaw 2026.9.7: the telegram-ingress-drain-factory chunk is merged into transport-status-*.mjs (same
+// createTelegramInboundHandlers). Upstream merged handleEditedChannelPost into handleEditedMessage(ctx, kind) — the
+// insertion anchor targets the new signature `handleEditedMessage = async (ctx, kind) =>` (the 9.6 one is kept as a
+// fallback). The guest_message handler semantics are unchanged: handleInboundMessageLike still takes isForum from the
+// event; messageThreadId is no longer read from the event in 9.7 (harmless, kept for parity).
 import { replaceOnce, contains } from "../lib/patch-helpers.mjs";
 export const label = "telegram-guest-mode-bot";
-export const verdict = "rewrite";
 export const target = { key: "bot", label: "Telegram ingress drain-factory bundle (inbound handlers)", needles: ["function registerTelegramInboundHandlers({ bot, pipeline })", "function createTelegramInboundPipeline({ params, message, authorization })", "const handleInboundMessageLike = async (event) => {"] };
 const EDIT_ANCHOR_97 = "\tconst handleEditedMessage = async (ctx, kind) => {";
 const EDIT_ANCHOR_96 = "\tconst handleEditedMessage = async (ctx) => {";
@@ -72,14 +71,14 @@ ${editAnchor}`,
   );
   return next;
 }
-export const check = { gate: "required", assertions: [
+export const check = { assertions: [
   contains('bot.on("guest_message"', "guest_message handler"),
   contains("handlers.handleGuestMessage(ctx)", "guest pipeline branch"),
   contains('errorMessage: "guest_message handler failed"', "guest inbound event"),
-  // дрейф 9.7: pipeline.handle должен вести guest-ветку сразу после message; обработчик — рядом с handleEditedMessage.
+  // drift 9.7: pipeline.handle must route the guest branch right after message; the handler sits next to handleEditedMessage.
   contains("\t\tif (ctx.message) return await handlers.handleMessage(ctx);\n\t\tif (ctx.guestMessage ?? ctx.update?.guest_message) return await handlers.handleGuestMessage(ctx);", "guest branch right after message branch"),
   contains("\treturn {\n\t\thandleMessage,\n\t\thandleGuestMessage,", "guest handler exported from createTelegramInboundHandlers"),
-  // handleInboundMessageLike должен по-прежнему принимать форму event, которую передаёт guest-обработчик
+  // handleInboundMessageLike must still accept the event shape the guest handler passes
   contains("const handleInboundMessageLike = async (event) => {", "handleInboundMessageLike(event) contract"),
   contains("\t\t\t\tisForum: event.isForum,\n\t\t\t\tsenderId: event.senderId,", "authorizeInboundMessage still reads event.isForum/senderId"),
 ] };

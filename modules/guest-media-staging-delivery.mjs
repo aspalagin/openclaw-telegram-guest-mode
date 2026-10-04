@@ -1,34 +1,39 @@
-// Метка guest-media-staging-delivery (new 2026-10-04; чанк delivery-BE0K214i.mjs). Guest-модуль, каскад ПОСЛЕ guest-ack-edit-delivery
-// (ставится последним в ключе delivery): добавляет СВОЙ регион сразу за регионом реестра guest-ack (перед deliverTextReply), регион guest-ack
-// не трогает (его модуль переписывает только свой регион между своими маркерами).
+// Module guest-media-staging-delivery (delivery.replies bundle). Cascade AFTER guest-ack-edit-delivery (last in the
+// delivery entry): adds its own region right after the guest-ack registry region (before deliverTextReply) and never
+// touches the registry region (that module rewrites only the code between its own markers).
 //
-// Дефект B: файлы/фото гостю. Bot API 10.3: в inline-сообщение гостя (answerGuestQuery →
-// inline_message_id) upload новых файлов запрещён — только file_id уже загруженного; rich-блоки InputRichBlockPhoto/Document/Video/Animation/
-// Audio/VoiceNote принимают InputMedia* с file_id; editMessageMedia(inline_message_id, InputMedia{media: file_id}) заменяет текст медиа.
-// Схема: порт guest-media-staging-runner перенаправляет message send с медиа из guest-сессии в staging-чат (mediaStagingChatId в файле
-// правил, дефолта нет — без него медиа гостю выключены), берёт file_id из реестра telegram-sent-media-file-ids и вызывает
+// Files and photos for a guest. Bot API 10.3: uploading a new file into a guest inline message (answerGuestQuery →
+// inline_message_id) is impossible — only a file_id of an already uploaded file; the rich blocks InputRichBlockPhoto/
+// Document/Video/Animation/Audio/VoiceNote take InputMedia* with a file_id, and editMessageMedia(inline_message_id,
+// InputMedia{media: file_id}) replaces the text with media. Scheme: guest-media-staging-runner reroutes a `message send`
+// with media from a guest session into the staging chat (mediaStagingChatId in the rules file, no default), takes the
+// file_id from the telegram-sent-media-file-ids registry and calls
 //   registry.attachMediaBySession(sessionKey, {kind, fileId, fileName, mimeType, size, caption}) → {delivered, mode, inlineMessageId} | {delivered:false, reason}
-// Здесь: (1) правила медиа из того же файла <OPENCLAW_STATE_DIR | $HOME/.openclaw>/hotfix-guest-ack.json — media.enabled (дефолт true), mediaStagingChatId
-// (дефолта нет), media.maxBlocks (дефолт 10, клампы 1–20); (2) attachMediaBySession: нет inline-сообщения (state armed) → плейсхолдер
-// ставится немедленно; затем правка editMessageText(rich_message = текущий документ + медиа-блоки) — текущий документ = плейсхолдер (state
-// placeholder) или entry.lastSource (answered) тем же конвейером planTelegramTextDeliveryPages; при ошибке rich — fallback
-// editMessageMedia(inline_message_id, InputMedia{file_id, caption}) (сообщение становится медиа с подписью, entry.mediaReplaced=true);
-// (3) обёртка над hotfixGuestAckEditInline: ЛЮБАЯ последующая правка этого сообщения (heartbeat plain, финал rich/plain, append) несёт
-// прикреплённые медиа-блоки (entry.media), иначе финал стёр бы вложение; plain-правка превращается в rich тем же конвейером; при ошибке
-// rich+медиа — повтор без медиа с логом «edit with media blocks failed». В режиме mediaReplaced текстовые правки идут в editMessageCaption
-// (≤1024), rich-правка намеренно падает → вызывающие ретраят plain. Reassign top-level function declaration в ESM-модуле допустим
-// (binding мутабелен; вызовы по имени видят обёртку). Логи: «[hotfix][guest-ack] media attached …» и т.д. через hotfixGuestAckLog.
-import { insertBefore, contains, notContains } from "../lib/patch-helpers.mjs";
+// Here: (1) media rules from the same rules file — media.enabled (default true), mediaStagingChatId / media.stagingChatId
+// (default empty = disabled), media.maxBlocks (default 10, clamped 1–20); (2) attachMediaBySession: no inline message yet
+// (state armed) → the placeholder is sent immediately; then an editMessageText(rich_message = current document + media
+// blocks) — the current document is the placeholder (state placeholder) or entry.lastSource (answered) through the same
+// planTelegramTextDeliveryPages pipeline; on a rich error → editMessageMedia(inline_message_id, InputMedia{file_id,
+// caption}) fallback (the message becomes a media message with a caption, entry.mediaReplaced=true); (3) a wrapper over
+// hotfixGuestAckEditInline: EVERY later edit of this message (plain heartbeat, rich/plain final, append) carries the
+// attached media blocks (entry.media), otherwise the final would erase the attachment; a plain edit becomes rich through
+// the same pipeline; on a rich+media error → retry without media with the log "edit with media blocks failed". In
+// mediaReplaced mode text edits go to editMessageCaption (≤ 1024), a rich edit fails on purpose → callers retry plain.
+// Reassigning a top-level function declaration in an ESM module is allowed (the binding is mutable; calls by name see
+// the wrapper). (4) stageAndAttachMedia (direct mode): a local file is uploaded to the staging chat through the bot's
+// own grammy client (bot.api.raw.sendPhoto/… with a grammy InputFile — honours apiRoot, proxy and the account
+// throttler); only when the bot object has no raw API, or grammy cannot be loaded, a direct multipart HTTP call against
+// the configured apiRoot is used. The allowlist of local roots (realpath) is enforced by the runner before calling in.
+// Logs: "[hotfix][guest-ack] media attached …" etc. through hotfixGuestAckLog; file names only, never file_id.
+import { replaceRegion, contains, notContains, count } from "../lib/patch-helpers.mjs";
 import { patch as ackPatch, target as ackTarget } from "./guest-ack-edit-delivery.mjs";
 export const label = "guest-media-staging-delivery";
-export const verdict = "port";
 export const target = ackTarget;
 const MARK = "hotfix: guest-media-staging";
 const REGION_START = `//#region ${MARK} (registry extension)`;
-const REGION_END = "//#endregion\n";
 const REGION = [
-  `${REGION_START} 2026-10-04 — медиа гостю: file_id из staging-чата → медиа-блоки в inline-сообщении гостя; правила media.* из файла guest-ack`,
-  "const HOTFIX_GUEST_MEDIA_DEFAULTS = Object.freeze({ enabled: true, stagingChatId: \"\", maxBlocks: 10 }); // kit: no default staging chat — set mediaStagingChatId in the rules file (guest media stays disabled until then)",
+  `${REGION_START} v4: guest media — file_id from the staging chat → media blocks in the guest inline message; media.* rules from the guest-ack rules file; uploads through the bot client (apiRoot-aware)`,
+  "const HOTFIX_GUEST_MEDIA_DEFAULTS = Object.freeze({ enabled: true, stagingChatId: \"\", maxBlocks: 10 }); // no default staging chat — set mediaStagingChatId in the rules file (guest media stays disabled until then)",
   "const HOTFIX_GUEST_MEDIA_CAPTION_LIMIT = 1024;",
   "const HOTFIX_GUEST_MEDIA_INPUT_MEDIA_KINDS = new Set([\"photo\", \"document\", \"video\", \"animation\", \"audio\", \"voice\"]);",
   "let hotfixGuestMediaRulesCache = { stamp: null, rules: null };",
@@ -55,7 +60,7 @@ const REGION = [
   "\t\t\tstagingChatId: hotfixGuestMediaStagingChatId(parsed.mediaStagingChatId ?? media.stagingChatId, HOTFIX_GUEST_MEDIA_DEFAULTS.stagingChatId),",
   "\t\t\tmaxBlocks: hotfixGuestAckNumber(media.maxBlocks, HOTFIX_GUEST_MEDIA_DEFAULTS.maxBlocks, 1, 20)",
   "\t\t});",
-  "\t\tlogVerbose(`[hotfix][guest-ack] media rules loaded: enabled=${rules.enabled} stagingChatId=${rules.stagingChatId} maxBlocks=${rules.maxBlocks}`);",
+  "\t\tlogVerbose(`[hotfix][guest-ack] media rules loaded: enabled=${rules.enabled} stagingChat=${rules.stagingChatId ? \"set\" : \"unset\"} maxBlocks=${rules.maxBlocks}`);",
   "\t} catch (err) {",
   "\t\tlogVerbose(`[hotfix][guest-ack] media rules invalid (${HOTFIX_GUEST_ACK_FILE}): ${String(err?.message ?? err)}; using built-in defaults`);",
   "\t}",
@@ -69,7 +74,7 @@ const REGION = [
   "\treturn clean.length > HOTFIX_GUEST_MEDIA_CAPTION_LIMIT ? `${clean.slice(0, HOTFIX_GUEST_MEDIA_CAPTION_LIMIT - 1)}…` : clean;",
   "}",
   "// InputRichBlock{Photo,Document,Video,Animation,Audio,VoiceNote}: { type, <type>: InputMedia*{type, media: file_id}, caption?: RichBlockCaption{text} }.",
-  "// video_note/sticker в rich-блоки и InputMedia не входят → не поддерживаются (вызывающий сообщит причину).",
+  "// video_note/sticker are neither rich blocks nor InputMedia → unsupported (the caller reports the reason).",
   "function hotfixGuestMediaBlock(item) {",
   "\tconst fileId = typeof item?.fileId === \"string\" ? item.fileId.trim() : \"\";",
   "\tif (!fileId) return;",
@@ -85,7 +90,7 @@ const REGION = [
   "\t\tdefault: return;",
   "\t}",
   "}",
-  "// Rich-документ текущей правки + прикреплённые медиа-блоки. Plain-текст превращается в rich тем же конвейером, что ответы гостю.",
+  "// Rich document of the current edit + attached media blocks. Plain text becomes rich through the same pipeline as guest replies.",
   "function hotfixGuestMediaRichWithBlocks(entry, content, media) {",
   "\tif (entry?.richMessages !== true || !entry?.rules?.richEnabled) return;",
   "\tlet base = content?.richMessage && Array.isArray(content.richMessage.blocks) ? content.richMessage : void 0;",
@@ -101,16 +106,17 @@ const REGION = [
   "\t}",
   "\treturn { ...(base ?? {}), blocks: [...(base?.blocks ?? []), ...media.map((item) => item.block)] };",
   "}",
+  "// JSON Bot API call: bot.api.raw when available, else a direct HTTP call against the configured apiRoot (hotfixTelegramApiRoot).",
   "async function hotfixGuestMediaRawApi(entry, method, body) {",
   "\tconst api = entry.bot?.api;",
   "\tif (typeof api?.raw?.[method] === \"function\") return await api.raw[method](body);",
   "\tif (!entry.token?.trim()) throw new Error(`telegram ${method} fallback unavailable: missing bot token`);",
-  "\tconst res = await fetch(`https://api.telegram.org/bot${entry.token}/${method}`, { method: \"POST\", headers: { \"content-type\": \"application/json\" }, body: JSON.stringify(body) });",
+  "\tconst res = await fetch(`${hotfixTelegramApiRoot(entry.bot)}/bot${entry.token}/${method}`, { method: \"POST\", headers: { \"content-type\": \"application/json\" }, body: JSON.stringify(body) });",
   "\tconst data = await res.json().catch(() => null);",
   "\tif (!res.ok || !data?.ok) throw new Error(`telegram ${method} failed: ${typeof data?.description === \"string\" ? data.description : `HTTP ${res.status}`}`);",
   "\treturn data.result;",
   "}",
-  "// Обёртка: любая правка inline-сообщения с прикреплёнными медиа несёт их блоки; режим mediaReplaced → подпись медиа-сообщения.",
+  "// Wrapper: every edit of an inline message with attached media carries their blocks; mediaReplaced mode → caption of the media message.",
   "const hotfixGuestAckEditInlineBase = hotfixGuestAckEditInline;",
   "hotfixGuestAckEditInline = async function hotfixGuestAckEditInlineWithMedia(entry, content) {",
   "\tconst media = Array.isArray(entry?.media) ? entry.media.filter((item) => item?.block) : [];",
@@ -138,7 +144,7 @@ const REGION = [
   "\tconst doc = hotfixGuestAckPlanDocument(entry, source, void 0);",
   "\treturn { richMessage: doc.richMessage, text: truncateTelegramGuestText(doc.plainText) };",
   "}",
-  "// Вход для guest-media-staging-runner. item: {kind, fileId, fileName?, mimeType?, size?, caption?}. Правки одной entry сериализуются (entry.mediaQueue).",
+  "// Entry for guest-media-staging-runner. item: {kind, fileId, fileName?, mimeType?, size?, caption?}. Edits of one entry are serialized (entry.mediaQueue).",
   "hotfixGuestAckRegistry.attachMediaBySession = async (sessionKey, item) => {",
   "\tif (!loadHotfixGuestAckRules().enabled) return { delivered: false, reason: \"guest-ack disabled (rules.enabled=false)\" };",
   "\tconst mediaRules = loadHotfixGuestMediaRules();",
@@ -205,9 +211,10 @@ const REGION = [
   "\t\tif (entry.mediaQueue === current) entry.mediaQueue = void 0;",
   "\t}",
   "};",
-  "// v3: локальный файл для гостя грузится в staging-чат НАПРЯМУЮ Bot API (multipart sendPhoto/sendVideo/sendAnimation/sendAudio/sendDocument),",
-  "// минуя outbound-пайплайн: там текст+локальное медиа у rich-аккаунта уходит prefer-payload → rich-embed (sendRichMessage), и file_id в реестр",
-  "// telegram-sent-media-file-ids не попадает. Ответ Bot API сразу даёт file_id → attachMediaBySession. Allowlist корней проверяет вызывающий (runner).",
+  "// Direct mode: a local file for a guest is uploaded to the staging chat by the registry itself (sendPhoto/sendVideo/sendAnimation/sendAudio/",
+  "// sendDocument), bypassing the outbound pipeline: there, text + local media of a rich-enabled account goes prefer-payload → rich embed",
+  "// (sendRichMessage) and the file_id never reaches the telegram-sent-media-file-ids registry. The Bot API response carries the file_id",
+  "// → attachMediaBySession. The allowlist of local roots is checked by the caller (runner, realpath).",
   "const HOTFIX_GUEST_MEDIA_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;",
   "const HOTFIX_GUEST_MEDIA_MAX_PHOTO_BYTES = 10 * 1024 * 1024;",
   "const HOTFIX_GUEST_MEDIA_MIME_BY_EXT = Object.freeze({ jpg: \"image/jpeg\", jpeg: \"image/jpeg\", png: \"image/png\", webp: \"image/webp\", gif: \"image/gif\", heic: \"image/heic\", bmp: \"image/bmp\", mp4: \"video/mp4\", mov: \"video/quicktime\", webm: \"video/webm\", mkv: \"video/x-matroska\", mp3: \"audio/mpeg\", m4a: \"audio/mp4\", aac: \"audio/aac\", ogg: \"audio/ogg\", oga: \"audio/ogg\", opus: \"audio/ogg\", wav: \"audio/wav\", flac: \"audio/flac\", pdf: \"application/pdf\", md: \"text/markdown\", txt: \"text/plain\", csv: \"text/csv\", json: \"application/json\", html: \"text/html\", docx: \"application/vnd.openxmlformats-officedocument.wordprocessingml.document\", xlsx: \"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\", pptx: \"application/vnd.openxmlformats-officedocument.presentationml.presentation\", zip: \"application/zip\" });",
@@ -216,7 +223,7 @@ const REGION = [
   "\tconst ext = String(fileName ?? \"\").toLowerCase().match(/\\.([a-z0-9]+)$/)?.[1];",
   "\treturn (ext && HOTFIX_GUEST_MEDIA_MIME_BY_EXT[ext]) || \"application/octet-stream\";",
   "}",
-  "// Метод загрузки по MIME/размеру: фото ≤10 МБ (jpeg/png/webp) → sendPhoto; gif → sendAnimation; видео → sendVideo; аудио → sendAudio; иначе sendDocument.",
+  "// Upload method by MIME/size: photos ≤ 10 MB (jpeg/png/webp) → sendPhoto; gif → sendAnimation; video/* → sendVideo; audio/* → sendAudio; else sendDocument.",
   "function hotfixGuestMediaUploadPlan(mime, size, forceDocument) {",
   "\tif (forceDocument) return { method: \"sendDocument\", field: \"document\", kind: \"document\" };",
   "\tif (mime === \"image/gif\") return { method: \"sendAnimation\", field: \"animation\", kind: \"animation\" };",
@@ -225,6 +232,8 @@ const REGION = [
   "\tif (mime.startsWith(\"audio/\")) return { method: \"sendAudio\", field: \"audio\", kind: \"audio\" };",
   "\treturn { method: \"sendDocument\", field: \"document\", kind: \"document\" };",
   "}",
+  "// Copy of hotfixTelegramSentMediaDescriptor (telegram-sent-media-file-ids, send chunk) without the extra fields — a different chunk, so the",
+  "// code is duplicated on purpose; keep the two in sync.",
   "function hotfixGuestMediaDescriptorFromMessage(message) {",
   "\tif (!message || typeof message !== \"object\") return;",
   "\tif (message.animation?.file_id) return { kind: \"animation\", fileId: message.animation.file_id, fileName: message.animation.file_name, mimeType: message.animation.mime_type, size: message.animation.file_size };",
@@ -234,14 +243,41 @@ const REGION = [
   "\tif (message.audio?.file_id) return { kind: \"audio\", fileId: message.audio.file_id, fileName: message.audio.file_name, mimeType: message.audio.mime_type, size: message.audio.file_size };",
   "\tif (message.voice?.file_id) return { kind: \"voice\", fileId: message.voice.file_id, mimeType: message.voice.mime_type, size: message.voice.file_size };",
   "}",
-  "async function hotfixGuestMediaUploadViaBotApi(token, method, form) {",
-  "\tconst transport = typeof hotfixGuestAckRegistry.__uploadTransport === \"function\" ? hotfixGuestAckRegistry.__uploadTransport : fetch; // репро подменяет транспорт",
-  "\tconst res = await transport(`https://api.telegram.org/bot${token}/${method}`, { method: \"POST\", body: form });",
+  "// grammy InputFile, loaded lazily from the same grammy instance the bot uses (the send chunk imports it statically, so the dynamic import",
+  "// resolves the cached module); null when grammy is unavailable → HTTP fallback.",
+  "let hotfixGuestMediaInputFileCtor;",
+  "async function hotfixGuestMediaInputFile() {",
+  "\tif (hotfixGuestMediaInputFileCtor !== void 0) return hotfixGuestMediaInputFileCtor;",
+  "\ttry {",
+  "\t\tconst grammy = await import(\"grammy\");",
+  "\t\thotfixGuestMediaInputFileCtor = typeof grammy?.InputFile === \"function\" ? grammy.InputFile : null;",
+  "\t} catch (err) {",
+  "\t\tlogVerbose(`[hotfix][guest-ack] grammy InputFile unavailable, staging uploads use the direct Bot API fallback: ${formatErrorMessage(err)}`);",
+  "\t\thotfixGuestMediaInputFileCtor = null;",
+  "\t}",
+  "\treturn hotfixGuestMediaInputFileCtor;",
+  "}",
+  "// Multipart upload: (1) test transport override; (2) bot.api.raw[method] with a grammy InputFile — the bot's own client (apiRoot, proxy,",
+  "// throttler); (3) direct multipart HTTP call against the configured apiRoot when the bot has no raw API or grammy cannot be loaded.",
+  "async function hotfixGuestMediaUploadViaBotApi(entry, method, upload) {",
+  "\tconst transport = typeof hotfixGuestAckRegistry.__uploadTransport === \"function\" ? hotfixGuestAckRegistry.__uploadTransport : void 0; // offline repros replace the transport",
+  "\tconst api = entry.bot?.api;",
+  "\tif (!transport && typeof api?.raw?.[method] === \"function\") {",
+  "\t\tconst InputFile = await hotfixGuestMediaInputFile();",
+  "\t\tif (InputFile) return await api.raw[method]({ chat_id: upload.chatId, [upload.field]: new InputFile(upload.buffer, upload.fileName), ...(upload.caption ? { caption: upload.caption } : {}) });",
+  "\t}",
+  "\tconst token = entry.token;",
+  "\tif (!token?.trim()) throw new Error(`telegram ${method} fallback unavailable: missing bot token`);",
+  "\tconst form = new FormData();",
+  "\tform.set(\"chat_id\", upload.chatId);",
+  "\tform.set(upload.field, new Blob([upload.buffer], { type: upload.mime }), upload.fileName);",
+  "\tif (upload.caption) form.set(\"caption\", upload.caption);",
+  "\tconst res = await (transport ?? fetch)(`${hotfixTelegramApiRoot(entry.bot)}/bot${token}/${method}`, { method: \"POST\", body: form });",
   "\tconst data = await res.json().catch(() => null);",
   "\tif (!res.ok || !data?.ok) throw new Error(`telegram ${method} failed: ${typeof data?.description === \"string\" ? data.description : `HTTP ${res.status}`}`);",
   "\treturn data.result;",
   "}",
-  "// Вход для guest-media-staging-runner (режим direct). item: { path, fileName?, mimeType?, caption?, stagingChatId, forceDocument? }.",
+  "// Entry for guest-media-staging-runner (direct mode). item: { path (realpath, allowlisted by the caller), fileName?, mimeType?, caption?, stagingChatId, forceDocument? }.",
   "hotfixGuestAckRegistry.stageAndAttachMedia = async (sessionKey, item) => {",
   "\tif (!loadHotfixGuestAckRules().enabled) return { delivered: false, reason: \"guest-ack disabled (rules.enabled=false)\" };",
   "\tconst mediaRules = loadHotfixGuestMediaRules();",
@@ -249,20 +285,22 @@ const REGION = [
   "\tconst entry = hotfixGuestAckRegistry.resolveBySession(sessionKey);",
   "\tif (!entry) return { delivered: false, reason: \"no guest query entry for this session (never armed, expired or gateway restarted)\" };",
   "\tconst token = typeof entry.token === \"string\" ? entry.token.trim() : \"\";",
-  "\tif (!token) return { delivered: false, reason: \"staging upload unavailable: guest entry has no bot token\" };",
+  "\tconst rawUpload = !hotfixGuestAckRegistry.__uploadTransport && typeof entry.bot?.api?.raw?.sendDocument === \"function\";",
+  "\tif (!token && !rawUpload) return { delivered: false, reason: \"staging upload unavailable: guest entry has no bot token\" };",
   "\tconst filePath = typeof item?.path === \"string\" ? item.path : \"\";",
   "\tconst stagingChatId = typeof item?.stagingChatId === \"string\" && item.stagingChatId ? item.stagingChatId : mediaRules.stagingChatId;",
   "\tif (!stagingChatId) return { delivered: false, reason: \"guest media staging chat is not configured (mediaStagingChatId in the guest-ack rules file)\" };",
+  "\tconst baseName = filePath.split(\"/\").pop() || \"file\";",
   "\tlet stat;",
   "\ttry {",
   "\t\tstat = fs.statSync(filePath);",
   "\t} catch (err) {",
   "\t\treturn { delivered: false, reason: `staging file not readable: ${formatErrorMessage(err)}` };",
   "\t}",
-  "\tif (!stat.isFile()) return { delivered: false, reason: `staging source is not a regular file: ${filePath}` };",
-  "\tif (stat.size <= 0) return { delivered: false, reason: `staging file is empty: ${filePath}` };",
+  "\tif (!stat.isFile()) return { delivered: false, reason: `staging source is not a regular file: ${baseName}` };",
+  "\tif (stat.size <= 0) return { delivered: false, reason: `staging file is empty: ${baseName}` };",
   "\tif (stat.size > HOTFIX_GUEST_MEDIA_MAX_UPLOAD_BYTES) return { delivered: false, reason: `staging file too large for Bot API upload (${stat.size} bytes > ${HOTFIX_GUEST_MEDIA_MAX_UPLOAD_BYTES})` };",
-  "\tconst fileName = typeof item.fileName === \"string\" && item.fileName.trim() ? item.fileName.trim() : (filePath.split(\"/\").pop() || \"file\");",
+  "\tconst fileName = typeof item.fileName === \"string\" && item.fileName.trim() ? item.fileName.trim() : baseName;",
   "\tconst mime = hotfixGuestMediaMime(fileName, item.mimeType);",
   "\tconst caption = hotfixGuestMediaCaption(item.caption);",
   "\tlet buffer;",
@@ -271,13 +309,7 @@ const REGION = [
   "\t} catch (err) {",
   "\t\treturn { delivered: false, reason: `staging file read failed: ${formatErrorMessage(err)}` };",
   "\t}",
-  "\tconst upload = async (plan) => {",
-  "\t\tconst form = new FormData();",
-  "\t\tform.set(\"chat_id\", stagingChatId);",
-  "\t\tform.set(plan.field, new Blob([buffer], { type: mime }), fileName);",
-  "\t\tif (caption) form.set(\"caption\", caption);",
-  "\t\treturn await hotfixGuestMediaUploadViaBotApi(token, plan.method, form);",
-  "\t};",
+  "\tconst upload = async (plan) => await hotfixGuestMediaUploadViaBotApi(entry, plan.method, { chatId: stagingChatId, field: plan.field, buffer, fileName, mime, caption });",
   "\tlet plan = hotfixGuestMediaUploadPlan(mime, stat.size, item.forceDocument === true);",
   "\tlet message;",
   "\ttry {",
@@ -299,7 +331,7 @@ const REGION = [
   "\tconst descriptor = hotfixGuestMediaDescriptorFromMessage(message);",
   "\tconst stagingMessageId = message?.message_id != null ? String(message.message_id) : void 0;",
   "\tconst resolvedStagingChatId = message?.chat?.id != null ? String(message.chat.id) : stagingChatId;",
-  "\thotfixGuestAckLog(entry, `staging upload ok: ${plan.method} chat=${resolvedStagingChatId} message_id=${stagingMessageId ?? \"?\"} file=${fileName} mime=${mime} size=${stat.size} file_id=${descriptor?.fileId ? \"yes\" : \"no\"}`);",
+  "\thotfixGuestAckLog(entry, `staging upload ok: ${plan.method} message_id=${stagingMessageId ?? \"?\"} file=${fileName} mime=${mime} size=${stat.size} file_id=${descriptor?.fileId ? \"yes\" : \"no\"}`);",
   "\tif (globalThis.__openclawHotfixTelegramSentMedia instanceof Map && descriptor?.fileId && stagingMessageId) globalThis.__openclawHotfixTelegramSentMedia.set(`${resolvedStagingChatId}:${stagingMessageId}`, { ...descriptor, chatId: resolvedStagingChatId, messageId: stagingMessageId, caption, at: Date.now() });",
   "\tif (!descriptor?.fileId) return { delivered: false, reason: `staging upload returned no file_id (${plan.method}, message_id=${stagingMessageId ?? \"?\"})`, stagingMessageId, stagingChatId: resolvedStagingChatId, uploadMethod: plan.method };",
   "\tconst attached = await hotfixGuestAckRegistry.attachMediaBySession(sessionKey, { ...descriptor, fileName: descriptor.fileName ?? fileName, caption: item.caption });",
@@ -309,43 +341,39 @@ const REGION = [
   "",
 ].join("\n");
 const ANCHOR = "async function deliverTextReply(params) {";
-function replaceRegion(source) {
-  const start = source.indexOf(REGION_START);
-  if (start === -1) return insertBefore(source, ANCHOR, REGION, "guest-media-staging region before deliverTextReply");
-  const endIdx = source.indexOf(REGION_END, start);
-  if (endIdx === -1) throw new Error("guest-media-staging: region without //#endregion");
-  return `${source.slice(0, start)}${REGION}${source.slice(endIdx + REGION_END.length)}`;
-}
 export function patch(source) {
   const next = ackPatch(source);
   if (next.includes(REGION)) return next;
-  return replaceRegion(next);
+  return replaceRegion(next, { start: REGION_START, body: REGION, anchor: ANCHOR, label: "guest-media-staging region before deliverTextReply" });
 }
-const count = (s, n) => s.split(n).length - 1;
 const order = (src) => {
   const ack = src.indexOf("//#region hotfix: guest-ack-edit (registry)");
   const mine = src.indexOf(REGION_START);
   const deliver = src.indexOf(ANCHOR);
-  if (ack < 0 || mine < 0 || deliver < 0) return "регионы guest-ack / guest-media-staging / deliverTextReply не найдены";
-  if (!(ack < mine && mine < deliver)) return "регион guest-media-staging должен стоять после региона реестра guest-ack и перед deliverTextReply";
+  if (ack < 0 || mine < 0 || deliver < 0) return "guest-ack / guest-media-staging regions or deliverTextReply not found";
+  if (!(ack < mine && mine < deliver)) return "the guest-media-staging region must follow the guest-ack registry region and precede deliverTextReply";
   return null;
 };
-export const check = { gate: "required", assertions: [
-  contains(REGION, "регион guest-media-staging целиком"),
-  contains("hotfixGuestAckRegistry.attachMediaBySession = async (sessionKey, item) => {", "вход attachMediaBySession"),
-  contains("hotfixGuestAckRegistry.mediaRules = loadHotfixGuestMediaRules;", "правила медиа доступны runner-порту"),
-  contains("hotfixGuestAckRegistry.stageAndAttachMedia = async (sessionKey, item) => {", "прямая загрузка в staging + вложение (v3)"),
-  contains("form.set(plan.field, new Blob([buffer], { type: mime }), fileName);", "multipart-загрузка через Bot API"),
-  contains("stagingChatId: \"\", maxBlocks: 10 })", "no hard-coded staging chat id (kit)"),
+export const check = { assertions: [
+  contains(REGION, "guest-media-staging region (whole)"),
+  contains("hotfixGuestAckRegistry.attachMediaBySession = async (sessionKey, item) => {", "attachMediaBySession entry"),
+  contains("hotfixGuestAckRegistry.mediaRules = loadHotfixGuestMediaRules;", "media rules exposed to the runner module"),
+  contains("hotfixGuestAckRegistry.stageAndAttachMedia = async (sessionKey, item) => {", "direct staging upload + attach entry"),
+  contains("new InputFile(upload.buffer, upload.fileName)", "upload through bot.api.raw with a grammy InputFile"),
+  contains("const grammy = await import(\"grammy\");", "grammy loaded lazily (no static import added to the chunk)"),
+  contains("(transport ?? fetch)(`${hotfixTelegramApiRoot(entry.bot)}/bot${token}/${method}`", "multipart HTTP fallback uses the configured apiRoot"),
+  contains("fetch(`${hotfixTelegramApiRoot(entry.bot)}/bot${entry.token}/${method}`", "JSON HTTP fallback uses the configured apiRoot"),
+  notContains("https://api.telegram.org/bot${", "direct Bot API call pinned to api.telegram.org (apiRoot ignored)"),
+  contains("stagingChatId: \"\", maxBlocks: 10 })", "no hard-coded staging chat id in the defaults"),
   (c) => /stagingChatId: "-?\d+"/.test(c) ? "unexpected hard-coded staging chat id" : null,
-  contains("hotfixGuestAckEditInline = async function hotfixGuestAckEditInlineWithMedia(entry, content) {", "обёртка над hotfixGuestAckEditInline"),
+  contains("hotfixGuestAckEditInline = async function hotfixGuestAckEditInlineWithMedia(entry, content) {", "wrapper over hotfixGuestAckEditInline"),
   order,
-  (c) => count(c, REGION_START) === 1 ? null : "регион guest-media-staging объявлен не один раз",
-  // зависимости из региона реестра guest-ack (переименование там ломает этот регион)
+  (c) => count(c, REGION_START) === 1 ? null : "guest-media-staging region declared more than once",
+  // dependencies from the guest-ack registry region and the delivery base (a rename there breaks this region)
   contains("async function hotfixGuestAckEditInline(entry, content) {", "hotfixGuestAckEditInline (guest-ack)"),
   contains("async function hotfixGuestAckSendPlaceholder(entry) {", "hotfixGuestAckSendPlaceholder (guest-ack)"),
   contains("function hotfixGuestAckClearTimers(entry) {", "hotfixGuestAckClearTimers (guest-ack)"),
-  contains("function hotfixGuestAckPlanDocument(entry, source, linkPreview) {", "hotfixGuestAckPlanDocument (guest-ack v3)"),
+  contains("function hotfixGuestAckPlanDocument(entry, source, linkPreview) {", "hotfixGuestAckPlanDocument (guest-ack)"),
   contains("function hotfixGuestAckPlaceholderText(entry, withElapsed) {", "hotfixGuestAckPlaceholderText (guest-ack)"),
   contains("function hotfixGuestAckNumber(value, fallback, min, max) {", "hotfixGuestAckNumber (guest-ack)"),
   contains("function hotfixGuestAckLog(entry, message) {", "hotfixGuestAckLog (guest-ack)"),
@@ -353,10 +381,11 @@ export const check = { gate: "required", assertions: [
   contains("const HOTFIX_GUEST_ACK_FILE = ", "HOTFIX_GUEST_ACK_FILE (guest-ack)"),
   contains("hotfixGuestAckRegistry.resolveBySession = ", "resolveBySession (guest-ack)"),
   contains("function truncateTelegramGuestText(text) {", "truncateTelegramGuestText (telegram-guest-mode-delivery)"),
+  contains("function hotfixTelegramApiRoot(bot) {", "hotfixTelegramApiRoot (telegram-guest-mode-delivery)"),
   contains("const TELEGRAM_GUEST_TEXT_LIMIT = 4096;", "TELEGRAM_GUEST_TEXT_LIMIT"),
-  contains("T as planTelegramTextDeliveryPages", "planTelegramTextDeliveryPages импортируется чанком из send-*"),
-  (c) => count(c, "import fs from \"node:fs\"") === 1 ? null : "import fs должен быть ровно один (ставит guest-ack-edit-delivery)",
-  // функция-обёртка не должна быть объявлена как const/let (иначе reassign невозможен) и объявлена ровно один раз
-  (c) => count(c, "function hotfixGuestAckEditInline(") === 1 ? null : "hotfixGuestAckEditInline объявлена не один раз",
-  notContains("const hotfixGuestAckEditInline =", "hotfixGuestAckEditInline объявлена как const (reassign невозможен)"),
+  contains("T as planTelegramTextDeliveryPages", "planTelegramTextDeliveryPages imported by the chunk from send-*"),
+  (c) => count(c, "import fs from \"node:fs\"") === 1 ? null : "exactly one import fs expected (added by guest-ack-edit-delivery)",
+  // the wrapped function must stay a function declaration (a const/let binding cannot be reassigned) declared exactly once
+  (c) => count(c, "function hotfixGuestAckEditInline(") === 1 ? null : "hotfixGuestAckEditInline declared more than once",
+  notContains("const hotfixGuestAckEditInline =", "hotfixGuestAckEditInline declared as const (cannot be reassigned)"),
 ] };

@@ -1,7 +1,8 @@
-// Метка guest-suppress-verbose-payloads: port в agent-runner.runtime (completeReplyAgentRun, agent-runner-result-complete.ts); якоря те же, отступ на 1 таб меньше.
+// Module guest-suppress-verbose-payloads (agent runner runtime bundle, completeReplyAgentRun in
+// agent-runner-result-complete.ts). Verbose extras (new-session banner, auto-compaction notice, trailing plugin-status
+// payload) are suppressed for ":guest:" sessions — a guest reply must be a single payload.
 import { replaceOnce, contains } from "../lib/patch-helpers.mjs";
 export const label = "guest-suppress-verbose-payloads";
-export const verdict = "port";
 export const target = { key: "agentRunner", label: "agent runner runtime bundle", needles: ["async function completeReplyAgentRun(input) {", "const prefixNotices = [];"] };
 export function patch(source) {
   if (source.includes("hotfix: guest-suppress-verbose-payloads")) return source;
@@ -25,7 +26,7 @@ export function patch(source) {
   );
   return next;
 }
-export const check = { gate: "required", assertions: [
+export const check = { assertions: [
   contains("hotfix: guest-suppress-verbose-payloads", "marker"),
   contains('const isGuestReplySession = typeof sessionKey === "string" && sessionKey.includes(":guest:");', "guest session flag"),
   contains("if (verboseEnabled && !isGuestReplySession && activeIsNewSession)", "new-session banner gated"),

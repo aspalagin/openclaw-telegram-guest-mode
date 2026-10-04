@@ -1,7 +1,7 @@
-// Метка guest-inbound-log-sender: port в bot-message (якорь telegramInboundLog.info без изменений).
+// Module guest-inbound-log-sender (bot-message bundle): the inbound log line names the real caller of a guest query
+// (`telegram:<chatId> (guest query by <callerId>)`) — the `from` field carries the chat id, which otherwise reads as the sender.
 import { replaceOnce, contains } from "../lib/patch-helpers.mjs";
 export const label = "guest-inbound-log-sender";
-export const verdict = "port";
 export const target = { key: "bot", label: "Telegram bot-message bundle (message context + dispatch)", needles: ["async function buildTelegramInboundContextPayload(params) {", "const sendRecordVoice = async () => {", "function createDraftState(params) {"] };
 export function patch(source) {
   if (source.includes("hotfix: guest-inbound-log-sender")) return source;
@@ -12,4 +12,4 @@ export function patch(source) {
     "guest inbound log sender",
   );
 }
-export const check = { gate: "required", assertions: [ contains("hotfix: guest-inbound-log-sender", "log sender marker"), contains("(guest query by ${context.ctxPayload.SenderId", "caller in log line") ] };
+export const check = { assertions: [ contains("hotfix: guest-inbound-log-sender", "log sender marker"), contains("(guest query by ${context.ctxPayload.SenderId", "caller in log line") ] };

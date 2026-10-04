@@ -1,41 +1,36 @@
-// Port-модуль метки guest-ultrafast-service-tier (new 2026-10-01, v2 2026-10-01: список сессий из файла; OpenClaw 2026.9.7;
-// target=builtin-openclaw chunk, region src/agents/embedded-agent-runner/attempt-transport (prepareEmbeddedAttemptTransport)). Guest-модуль (INCLUDE_GUEST=1).
-// Задача: OpenAI service tier "ultrafast" ПО УМОЛЧАНИЮ только для перечисленных сессий — изначально Telegram guest-сессии
-// (sessionKey с сегментом ":guest:", формат agent:<id>:telegram:…:guest:<userId>-at-<chatId>, создают guest-session-per-chat /
-// telegram-guest-mode-bot.2), с v2 — плюс любые ключи из файла <OPENCLAW_STATE_DIR | $HOME/.openclaw>/hotfix-ultrafast-sessions.json (например,
-// группа agent:<agent>:telegram:group:<groupId> и её топики :topic:<id>). Всем остальным (владелец, субагенты
-// agent:<id>:subagent:…, cron) — как было (/fast → priority, который санитайзер ChatGPT-бэкенда вырезает; см. openai-ultrafast-tier.2).
-// Вместо глобального params.serviceTier:"ultrafast" в конфиге агентов дефолт живёт в коде
-// на уровне попытки (attempt), где есть и sessionKey, и provider/modelId/config.
+// Module guest-ultrafast-service-tier (optional set, --with-ultrafast; builtin-openclaw chunk, region
+// src/agents/embedded-agent-runner/attempt-transport, prepareEmbeddedAttemptTransport).
+// OpenAI service tier "ultrafast" BY DEFAULT only for listed sessions — Telegram guest sessions out of the box (sessionKey
+// with the ":guest:" segment, format agent:<id>:telegram:…:guest:<userId>-at-<chatId>, created by guest-session-per-chat /
+// telegram-guest-mode-bot.2) plus any keys from the rules file. Everyone else (owner, sub-agents agent:<id>:subagent:…,
+// cron) keeps the upstream behaviour (/fast → priority, which the ChatGPT backend sanitizer strips; see
+// openai-ultrafast-tier.2). The default lives in code at attempt level, where sessionKey, provider, modelId and config
+// are all available, instead of a global params.serviceTier.
 //
-// Файл правил (горячий выключатель, читается при каждом резолве с кэшем по mtime+size — один statSync на попытку):
-//   { "enabled": true, "sessionKeyIncludes": [":guest:"], "sessionKeyPrefixes": ["agent:<agent>:telegram:group:<groupId>"], "sessionKeys": [] }
-//   includes — подстрока ключа; prefixes — ключ равен префиксу или начинается с "<prefix>:" (топики попадают, соседний chat id с тем же
-//   началом — нет); sessionKeys — точные ключи; enabled:false — выключить всё. Нет файла / битый JSON / не объект → встроенный дефолт
-//   { sessionKeyIncludes: [":guest:"] } и ОДИН warn в лог (повтор только после смены состояния файла). Путь можно переопределить env
-//   OPENCLAW_HOTFIX_ULTRAFAST_SESSIONS_FILE (для офлайн-репро; читается при загрузке модуля).
-//
-// Место: prepareEmbeddedAttemptTransport собирает streamExtraParamsOverride = { ...attempt.streamParams, fastMode } и передаёт его как
-// extraParamsOverride в runtimePlan.transport.resolveExtraParams(...) (build-*.mjs → resolvePreparedExtraParams) или напрямую в
-// resolvePreparedExtraParams. Override ложится ПОВЕРХ authored params модели/агента ({ ...resolved, ...override }), поэтому помощник
-// сам уступает явному tier: если serviceTier/service_tier задан в attempt.streamParams (параметры рана) или в любом authored-источнике
-// (agents.defaults.params, agents.defaults.models[key].params, agents.entries[agentId].models[key].params, agents.entries[agentId].params —
-// те же источники, что у resolveModelExtraParamSources), override не добавляется — явный params.serviceTier агента приоритетнее.
-// Дальше апстрим: provider-stream «openai-responses-defaults» — resolveOpenAIServiceTier(ctx.extraParams) (принимает "ultrafast" после
-// openai-ultrafast-tier.1) → createOpenAIServiceTierWrapper ставит payload.service_tier; при наличии tier fast-mode-обёртка не ставится.
-// Ограничение по замыслу: только provider === "openai" (у других провайдеров поле либо игнорируется, либо отвергается с warn);
-// фолбэки google/anthropic/mws не трогаются. Маршрут gpt-6-astra — embedded api openai-chatgpt-responses (ChatGPT OAuth; все guest-сессии
-// в sessions.<agent>.sqlite имеют agentHarnessId=openclaw); Codex app-server не используется (его закрывает внешний codex-ultrafast-fast-service-tier).
-// В чанке доступны `fs` (import fs from "node:fs") и `log$6` (import { t as log$6 } from "./logger-*.mjs") — helper использует их.
-// Апгрейд v1 → v2: patch() заменяет старый регион helper'а целиком (регион между маркером и его //#endregion), строка spread не меняется.
-// Kit v1.2.0 (optional module, --with-ultrafast): rules file resolved at runtime from
+// Rules file (hot switch, read on every resolve with an mtime+size cache — one statSync per attempt):
 //   OPENCLAW_HOTFIX_ULTRAFAST_SESSIONS_FILE, else <OPENCLAW_STATE_DIR | $HOME/.openclaw>/hotfix-ultrafast-sessions.json
+//   { "enabled": true, "sessionKeyIncludes": [":guest:"], "sessionKeyPrefixes": ["agent:<agent>:telegram:group:<groupId>"], "sessionKeys": [] }
+//   includes — substring of the key; prefixes — the key equals the prefix or starts with "<prefix>:" (topics match, a
+//   neighbouring chat id with the same leading digits does not); sessionKeys — exact keys; enabled:false — off. Missing
+//   file / invalid JSON / not an object → built-in default { sessionKeyIncludes: [":guest:"] } and ONE warning
+//   (repeated only after the file state changes).
+//
+// Placement: prepareEmbeddedAttemptTransport builds streamExtraParamsOverride = { ...attempt.streamParams, fastMode } and
+// passes it as extraParamsOverride to runtimePlan.transport.resolveExtraParams(...) (build-*.mjs → resolvePreparedExtraParams)
+// or directly to resolvePreparedExtraParams. The override lands ON TOP of the authored params of the model/agent
+// ({ ...resolved, ...override }), so the helper yields to an explicit tier: when serviceTier/service_tier is set in
+// attempt.streamParams (run params) or in any authored source (agents.defaults.params, agents.defaults.models[key].params,
+// agents.entries[agentId].models[key].params, agents.entries[agentId].params — the same sources as
+// resolveModelExtraParamSources), the override is not added. Downstream: the provider-stream "openai-responses-defaults"
+// → resolveOpenAIServiceTier(ctx.extraParams) (accepts "ultrafast" after openai-ultrafast-tier.1) →
+// createOpenAIServiceTierWrapper sets payload.service_tier; with a tier present the fast-mode wrapper is not applied.
+// By design only provider === "openai" (other providers ignore or reject the field); fallbacks to other providers are untouched.
+// Available in the chunk: `fs` (import fs from "node:fs") and `log$6` (import { t as log$6 } from "./logger-*.mjs").
 // Requires openai-ultrafast-tier.1/.2 (same optional set): vanilla normalizeOpenAIServiceTier rejects "ultrafast".
-import { replaceOnce, insertBefore, contains, notContains, rulesFileExpression } from "../lib/patch-helpers.mjs";
+import { replaceOnce, replaceRegion, contains, notContains, count, rulesFileExpression } from "../lib/patch-helpers.mjs";
 const MARK = "hotfix: guest-ultrafast-service-tier";
 const V2_MARK = "hotfix: guest-ultrafast-service-tier v2 (rules file)";
 export const label = "guest-ultrafast-service-tier";
-export const verdict = "port";
 export const target = {
   key: "builtinOpenclaw",
   label: "builtin-openclaw chunk (prepareEmbeddedAttemptTransport)",
@@ -45,12 +40,11 @@ export const target = {
   ],
 };
 const REGION_START = `//#region ${MARK}`;
-const REGION_END = "//#endregion\n";
 const HELPER_MARK = "function resolveGuestUltrafastServiceTierOverride(attempt, agentId) {";
 const RULES_FN_MARK = "function loadHotfixUltrafastRules() {";
 const MATCH_FN_MARK = "function hotfixUltrafastSessionMatches(sessionKey) {";
 const HELPER = [
-  `//#region ${MARK} (2026-10-01; ${V2_MARK}) — перечисленные сессии (дефолт: ":guest:"; файл hotfix-ultrafast-sessions.json в state dir) по умолчанию ходят на OpenAI с service_tier "ultrafast"; явный serviceTier рана/модели/агента важнее`,
+  `//#region ${MARK} (${V2_MARK}): listed sessions (default ":guest:"; hotfix-ultrafast-sessions.json in the state dir) go to OpenAI with service_tier "ultrafast" by default; an explicit serviceTier of the run/model/agent wins`,
   `const HOTFIX_ULTRAFAST_SESSIONS_FILE = ${rulesFileExpression("OPENCLAW_HOTFIX_ULTRAFAST_SESSIONS_FILE", "hotfix-ultrafast-sessions.json")};`,
   "const HOTFIX_ULTRAFAST_DEFAULT_RULES = Object.freeze({",
   "\tenabled: true,",
@@ -137,39 +131,30 @@ const HELPER = [
 const ANCHOR = "async function prepareEmbeddedAttemptTransport(input) {";
 const BEFORE = "\tconst streamExtraParamsOverride = {\n\t\t...attempt.streamParams,\n\t\tfastMode: attempt.fastMode\n\t};\n";
 const AFTER = `\tconst streamExtraParamsOverride = {\n\t\t...attempt.streamParams,\n\t\tfastMode: attempt.fastMode,\n\t\t...resolveGuestUltrafastServiceTierOverride(attempt, input.sessionAgentId) /* ${MARK} */\n\t};\n`;
-const count = (s, n) => s.split(n).length - 1;
-function replaceHelperRegion(source) {
-  const start = source.indexOf(REGION_START);
-  if (start === -1) return insertBefore(source, ANCHOR, HELPER, "guest-ultrafast helper before prepareEmbeddedAttemptTransport");
-  const endIdx = source.indexOf(REGION_END, start);
-  if (endIdx === -1) throw new Error("guest-ultrafast: region start without //#endregion");
-  if (source.indexOf(REGION_START, start + REGION_START.length) !== -1) throw new Error("guest-ultrafast: ambiguous helper region");
-  return `${source.slice(0, start)}${HELPER}${source.slice(endIdx + REGION_END.length)}`;
-}
 export function patch(source) {
   if (source.includes(HELPER) && source.includes(AFTER)) return source;
   let out = source;
-  if (!out.includes(HELPER)) out = replaceHelperRegion(out); // свежая вставка или апгрейд v1 → v2
+  if (!out.includes(HELPER)) out = replaceRegion(out, { start: REGION_START, body: HELPER, anchor: ANCHOR, label: "guest-ultrafast helper before prepareEmbeddedAttemptTransport" }); // fresh insert or upgrade of an earlier revision
   if (!out.includes(AFTER)) out = replaceOnce(out, BEFORE, AFTER, "streamExtraParamsOverride: guest ultrafast default");
   return out;
 }
-export const check = { gate: "required", assertions: [
-  contains(MARK, "маркер guest-ultrafast-service-tier"),
-  contains(V2_MARK, "маркер v2 (rules file)"),
-  contains(HELPER, "актуальный helper-регион целиком (v2)"),
-  contains(AFTER, "streamExtraParamsOverride с guest-ultrafast override"),
+export const check = { assertions: [
+  contains(MARK, "guest-ultrafast-service-tier marker"),
+  contains(V2_MARK, "v2 marker (rules file)"),
+  contains(HELPER, "current helper region (whole)"),
+  contains(AFTER, "streamExtraParamsOverride with the guest-ultrafast override"),
   contains(`const HOTFIX_ULTRAFAST_SESSIONS_FILE = ${rulesFileExpression("OPENCLAW_HOTFIX_ULTRAFAST_SESSIONS_FILE", "hotfix-ultrafast-sessions.json")};`, "rules file resolved from env / OpenClaw state dir (not hard-coded)"),
-  (c) => /"\/[^"\n]*\/\.openclaw\/hotfix-ultrafast-sessions\.json"/.test(c) ? "unexpected hard-coded host-specific rules path" : null,
-  contains("sessionKeyIncludes: [\":guest:\"],", "встроенный дефолт :guest:"),
-  contains("if (attempt.provider !== \"openai\") return {};", "ограничение provider openai"),
-  contains("return { serviceTier: \"ultrafast\" };", "дефолт ultrafast"),
-  notContains(BEFORE, "непропатченный streamExtraParamsOverride"),
-  notContains("if (typeof sessionKey !== \"string\" || !sessionKey.includes(\":guest:\")) return {};", "остаток v1-гейта по :guest:"),
-  // зависимости helper'а присутствуют в чанке (fs и логгер)
-  contains("import fs from \"node:fs\";", "import fs в чанке"),
-  contains("as log$6 } from \"./logger-", "import log$6 в чанке"),
-  // дрейф: override должен по-прежнему уходить в оба пути резолва (runtimePlan.transport.resolveExtraParams и resolvePreparedExtraParams)
-  (c) => count(c, "extraParamsOverride: streamExtraParamsOverride") === 2 ? null : `ожидалось 2 передачи streamExtraParamsOverride как extraParamsOverride, найдено ${count(c, "extraParamsOverride: streamExtraParamsOverride")}`,
-  // дрейф: helper-регион ровно один, helper объявлен/вызван по одному разу
-  (c) => count(c, REGION_START) === 1 && count(c, HELPER_MARK) === 1 && count(c, RULES_FN_MARK) === 1 && count(c, MATCH_FN_MARK) === 1 && count(c, "resolveGuestUltrafastServiceTierOverride(attempt, input.sessionAgentId)") === 1 ? null : "helper guest-ultrafast объявлен/вызван не по одному разу",
+  (c) => /HOTFIX_ULTRAFAST_SESSIONS_FILE = "\//.test(c) ? "hard-coded absolute rules path" : null,
+  contains("sessionKeyIncludes: [\":guest:\"],", "built-in default :guest:"),
+  contains("if (attempt.provider !== \"openai\") return {};", "provider restricted to openai"),
+  contains("return { serviceTier: \"ultrafast\" };", "ultrafast default"),
+  notContains(BEFORE, "unpatched streamExtraParamsOverride"),
+  notContains("if (typeof sessionKey !== \"string\" || !sessionKey.includes(\":guest:\")) return {};", "v1 :guest: gate remnant"),
+  // helper dependencies present in the chunk (fs and the logger)
+  contains("import fs from \"node:fs\";", "import fs in the chunk"),
+  contains("as log$6 } from \"./logger-", "import log$6 in the chunk"),
+  // drift: the override must still reach both resolve paths (runtimePlan.transport.resolveExtraParams and resolvePreparedExtraParams)
+  (c) => count(c, "extraParamsOverride: streamExtraParamsOverride") === 2 ? null : `expected streamExtraParamsOverride passed as extraParamsOverride 2 times, found ${count(c, "extraParamsOverride: streamExtraParamsOverride")}`,
+  // drift: exactly one helper region; helper declared/called once
+  (c) => count(c, REGION_START) === 1 && count(c, HELPER_MARK) === 1 && count(c, RULES_FN_MARK) === 1 && count(c, MATCH_FN_MARK) === 1 && count(c, "resolveGuestUltrafastServiceTierOverride(attempt, input.sessionAgentId)") === 1 ? null : "guest-ultrafast helper declared/called more than once",
 ] };

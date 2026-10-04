@@ -1,9 +1,10 @@
-// Метка guest-single-answer-guard: каскад поверх telegram-guest-mode-delivery (guest-ветка deliverTextReply переписана под sender.sendText, переменная guestDeliveredMessageId/markDelivered).
-// 2026-09-30 (2026.9.7): без изменений — PATCH-FAIL был каскадом от базы; guest-ветка всегда завершается return (sendMessage-fallback'а нет), проверено на пропатченном delivery-BE0K214i.mjs.
+// Module guest-single-answer-guard: cascade over telegram-guest-mode-delivery. A guest reply is inline-or-
+// dropped: when answerGuestQuery reports the query as expired, or returns no message id, the payload is
+// dropped with a diagnostic instead of falling back to sendMessage (which would deliver the guest's reply
+// into the operator's chat). The guest branch of deliverTextReply always ends with a return.
 import { replaceOnce, contains, notContains } from "../lib/patch-helpers.mjs";
 import { patch as basePatch, target as baseTarget } from "./telegram-guest-mode-delivery.mjs";
 export const label = "guest-single-answer-guard";
-export const verdict = "rewrite";
 export const target = baseTarget;
 export function patch(source) {
   const next = basePatch(source);
@@ -15,4 +16,4 @@ export function patch(source) {
     "guest-single-answer-guard delivery block (cascade: telegram-guest-mode-delivery)",
   );
 }
-export const check = { gate: "required", assertions: [ contains("hotfix: guest-single-answer-guard", "single-answer marker"), contains("[hotfix][guest-single-answer]", "diagnostic log tag"), notContains("falling back to sendMessage", "guest sendMessage fallback removed") ] };
+export const check = { assertions: [ contains("hotfix: guest-single-answer-guard", "single-answer marker"), contains("[hotfix][guest-single-answer]", "diagnostic log tag"), notContains("falling back to sendMessage", "guest sendMessage fallback removed") ] };

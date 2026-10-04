@@ -1,9 +1,12 @@
-// Метка guest-plain-delivery-normalize: каскад поверх telegram-guest-mode-delivery. HTML→plain — локальный helper (импорт telegramHtmlToPlainTextFallback из text-chunk-limit-* завязан на хэш-имя и минифицированную букву экспорта).
-// 2026-09-30 (2026.9.7): без изменений — PATCH-FAIL был каскадом от базы telegram-guest-mode-delivery (переякорена); guest-ветка deliverTextReply байт-в-байт как на проде 9.6.
+// Module guest-plain-delivery-normalize: cascade over telegram-guest-mode-delivery. Guest replies are
+// delivered as plain text (no parse_mode): HTML is converted to plain text by a local helper (importing
+// telegramHtmlToPlainTextFallback from text-chunk-limit-* would bind the kit to a hashed chunk name and a
+// minified export letter), and a leading status header line of the form "Модель: …" (the model banner some
+// workspaces prepend) is stripped — kept byte-for-byte from v1.1.x for behavioural parity. The rich path of
+// guest-ack-edit-delivery takes chunk.richMessage separately; this module keeps the plain fallback clean.
 import { replaceOnce, insertBefore, contains } from "../lib/patch-helpers.mjs";
 import { patch as basePatch, target as baseTarget } from "./telegram-guest-mode-delivery.mjs";
 export const label = "guest-plain-delivery-normalize";
-export const verdict = "rewrite";
 export const target = baseTarget;
 export function patch(source) {
   let next = basePatch(source);
@@ -38,4 +41,4 @@ function normalizeTelegramGuestPlainText(text) {
   next = replaceOnce(next, "\t\t\t\tparseMode: useHtml ? \"HTML\" : void 0,", "\t\t\t\tparseMode: void 0,", "guest-plain parseMode");
   return next;
 }
-export const check = { gate: "review", assertions: [ contains("function normalizeTelegramGuestPlainText(text)", "guest plain normalize helper"), contains("TELEGRAM_GUEST_MODEL_HEADER_RE", "guest model-header strip regex"), contains("parseMode: void 0,", "guest parseMode plain") ] };
+export const check = { assertions: [ contains("function normalizeTelegramGuestPlainText(text)", "guest plain normalize helper"), contains("TELEGRAM_GUEST_MODEL_HEADER_RE", "guest model-header strip regex"), contains("parseMode: void 0,", "guest parseMode plain") ] };

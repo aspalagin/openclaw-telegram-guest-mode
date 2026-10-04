@@ -1,8 +1,8 @@
-// Метка guest-session-per-chat: каскад поверх telegram-guest-mode-bot.2 (resolveTelegramGuestSessionKey в bot-message).
+// Module guest-session-per-chat: cascade over telegram-guest-mode-bot.2 (resolveTelegramGuestSessionKey in bot-message).
+// Guest session scope is `<callerId>-at-<chatId>`: a caller's guest queries in different chats never share a session.
 import { replaceOnce, contains } from "../lib/patch-helpers.mjs";
 import { patch as basePatch, target as baseTarget } from "./telegram-guest-mode-bot.2.mjs";
 export const label = "guest-session-per-chat";
-export const verdict = "port";
 export const target = baseTarget;
 export function patch(source) {
   const next = basePatch(source);
@@ -14,4 +14,4 @@ export function patch(source) {
     "guest session per chat",
   );
 }
-export const check = { gate: "required", assertions: [ contains("hotfix: guest-session-per-chat", "per-chat scope marker"), contains("`${callerUserId}-at-${chatScope}`", "caller+chat scope") ] };
+export const check = { assertions: [ contains("hotfix: guest-session-per-chat", "per-chat scope marker"), contains("`${callerUserId}-at-${chatScope}`", "caller+chat scope") ] };

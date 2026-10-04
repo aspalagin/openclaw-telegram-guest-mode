@@ -1,19 +1,18 @@
-// Метка guest-no-chat-fallback: port в delivery.replies — guest-сессия (sessionKey с ":guest:") без guestQueryId не должна
-// проваливаться в обычную отправку в чат (утечка ответа гостю/в чужой чат); payload дропается с диагностикой.
-// 2026-09-24 (переякорь под 2026.9.6): апстрим (8416d710158, #146361) разрезал deliverReplies на тонкие обёртки
-// deliverReplies / deliverStructuredReplies → общий deliverReplyPlan(params, createPlan). Основной финальный путь
-// bot-message (sendPayload) в 9.6 идёт через deliverStructuredReplies, deliverReplies — только deliverFallback и native-команды,
-// поэтому сторож ставится в начало deliverReplyPlan (покрывает оба входа; createPlan вызывается позже — ранний выход без работы).
-// params.sessionKeyForInternalHooks и params.guestQueryId по-прежнему приходят из createDeliveryBaseOptions (bot-message).
-// Формат возврата {delivered:false} совместим с 9.6 ({delivered, receipt?}; вызывающие проверяют result.delivered).
-// 2026-09-30 (ревью под 2026.9.7, чанк delivery-BE0K214i.mjs): лёг без изменений. Обёртки по-прежнему делегируют в deliverReplyPlan;
-// новый путь апстрима settleFailedFinalDelivery (#155906, 61214694cc1) шлёт предупреждение через deliverFallback → deliverReplies →
-// deliverReplyPlan, т.е. под этот же guard. В 9.7 {delivered:false} bot-message трактует как suppression "no_visible_result" →
-// finalFailed → попытки warning/"Something went wrong" — все снова идут через deliverReplyPlan и так же дропаются (sendMessage нет).
-// Добавлен сторож: новый экспорт чанка вида deliver*/send* (кроме двух обёрток) = новый вход доставки в обход guard'а.
+// Module guest-no-chat-fallback: port into delivery.replies. A guest session (sessionKey with ":guest:")
+// without a guestQueryId must never fall through to a regular chat send (the reply would land in the chat
+// the query was typed in, or in the operator's chat); the payload is dropped with a diagnostic.
+// OpenClaw 2026.9.6 split deliverReplies into thin wrappers deliverReplies / deliverStructuredReplies over a
+// shared deliverReplyPlan(params, createPlan). The main final path of bot-message (sendPayload) goes through
+// deliverStructuredReplies, deliverReplies serves deliverFallback and native commands, so the guard sits at
+// the head of deliverReplyPlan (covers both entries; createPlan is called later, so the early return does no
+// work). params.sessionKeyForInternalHooks and params.guestQueryId still come from createDeliveryBaseOptions.
+// 2026.9.7: unchanged. settleFailedFinalDelivery sends its warning through deliverFallback → deliverReplies →
+// deliverReplyPlan, i.e. under the same guard; a {delivered:false} result is treated by bot-message as the
+// "no_visible_result" suppression, whose follow-up warnings go through deliverReplyPlan again and are dropped
+// the same way (there is no sendMessage path). Drift guard: a new chunk export named deliver*/send* (other
+// than the two wrappers) would be a new delivery entry that bypasses the guard.
 import { replaceOnce, contains } from "../lib/patch-helpers.mjs";
 export const label = "guest-no-chat-fallback";
-export const verdict = "port";
 export const target = { key: "delivery", label: "Telegram delivery.replies bundle", needles: ["async function deliverTextReply(params) {", "async function deliverReplies(params) {", "async function deliverReplyPlan(params, createPlan) {", "function filterEmptyTelegramTextChunks(chunks) {"] };
 export function patch(source) {
   if (source.includes("hotfix: guest-no-chat-fallback")) return source;
@@ -33,8 +32,8 @@ export function patch(source) {
     "guest-no-chat-fallback delivery guard",
   );
 }
-// Сторож на место: guard обязан стоять внутри deliverReplyPlan (общий путь deliverReplies + deliverStructuredReplies),
-// а обе обёртки — делегировать в deliverReplyPlan (иначе один из входов обходит guard).
+// Placement guards: the guard must sit inside deliverReplyPlan (shared path of deliverReplies and
+// deliverStructuredReplies) and both wrappers must delegate to deliverReplyPlan (otherwise one entry bypasses it).
 const guardInReplyPlan = (src) => {
   const start = src.indexOf("async function deliverReplyPlan(params, createPlan) {");
   if (start < 0) return "deliverReplyPlan not found";
@@ -55,4 +54,4 @@ const noNewDeliveryExports = (src) => {
   const extra = names.filter((name) => /^(deliver|send)/i.test(name) && name !== "deliverReplies" && name !== "deliverStructuredReplies");
   return extra.length ? `new delivery export(s) may bypass guest guard: ${extra.join(", ")}` : null;
 };
-export const check = { gate: "required", assertions: [ contains("hotfix: guest-no-chat-fallback", "guard marker"), contains("[hotfix][guest-no-chat-fallback]", "diagnostic log tag"), contains('if (!params.guestQueryId && typeof params.sessionKeyForInternalHooks === "string" && params.sessionKeyForInternalHooks.includes(":guest:")) {', "guard condition"), guardInReplyPlan, wrappersDelegate, noNewDeliveryExports ] };
+export const check = { assertions: [ contains("hotfix: guest-no-chat-fallback", "guard marker"), contains("[hotfix][guest-no-chat-fallback]", "diagnostic log tag"), contains('if (!params.guestQueryId && typeof params.sessionKeyForInternalHooks === "string" && params.sessionKeyForInternalHooks.includes(":guest:")) {', "guard condition"), guardInReplyPlan, wrappersDelegate, noNewDeliveryExports ] };

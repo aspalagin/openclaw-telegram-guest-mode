@@ -8,7 +8,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { replaceOnce, contains } from "../lib/patch-helpers.mjs";
 export const label = "telegram-guest-allowed-update";
-export const verdict = "port";
 export const target = { key: "allowed", label: "Telegram allowed updates bundle", needles: ["DEFAULT_TELEGRAM_UPDATE_TYPES", "message_reaction", "channel_post"] };
 const PATCH_LINE = '\tif (!updates.includes("guest_message")) updates.push("guest_message");\n';
 function grammyHasGuestMessage(file) {
@@ -37,7 +36,7 @@ export function patch(source) {
     "guest_message allowed update",
   );
 }
-export const check = { gate: "required", assertions: [
+export const check = { assertions: [
   contains("const DEFAULT_TELEGRAM_UPDATE_TYPES = API_CONSTANTS.DEFAULT_UPDATE_TYPES;", "allowed updates derived from grammy API_CONSTANTS.DEFAULT_UPDATE_TYPES"),
   contains('const updates = DEFAULT_TELEGRAM_UPDATE_TYPES.filter((type) => type !== "stopped_message_generation");', "upstream filter of default update types (guest_message must not be filtered out)"),
   (c, file) => c.includes('updates.includes("guest_message")') || grammyHasGuestMessage(file) === true ? null : "guest_message neither pushed explicitly nor present in grammy DEFAULT_UPDATE_TYPES (poller will not receive guest queries)",

@@ -1,75 +1,90 @@
-// Port-модуль метки guest-ack-edit (часть 1/2, delivery; new 2026-10-04; OpenClaw 2026.9.7, чанк delivery-BE0K214i.mjs).
-// Guest-модуль (INCLUDE_GUEST=1), каскад поверх telegram-guest-mode-delivery → guest-plain-delivery-normalize → guest-single-answer-guard
-// → guest-no-chat-fallback (ставится ПОСЛЕДНИМ в ключе delivery; переписывает guest-ветку deliverTextReply целиком, сохраняя маркеры/строки,
-// которые проверяют assertions перечисленных портов).
+// Module guest-ack-edit-delivery (part 1/2, delivery.replies bundle; part 2/2 is guest-ack-edit-bot).
+// Cascade over telegram-guest-mode-delivery → guest-plain-delivery-normalize → guest-single-answer-guard →
+// guest-no-chat-fallback: rewrites the guest branch of deliverTextReply as a whole (keeping the markers and
+// lines the assertions of those modules check) and inserts the ack/edit registry region before deliverTextReply.
 //
-// Проблема: у Telegram Guest Mode один ответ на guest_query (answerGuestQuery), а TTL query не документирован (по журналу ответы проходили
-// до 248 с; истечение — после простоя gateway). Длинный ран (web_search, субагенты, 15+ мин) → «query is too old» → guest-single-answer-guard
-// молча дропает ответ, гость не видит ничего.
-// Лечение: реестр ack-состояний на globalThis.__openclawHotfixGuestAck (общий для чанков bot-message и delivery, без новых экспортов чанка):
-//   • arm({bot, token, runtime, guestQueryId, sessionKey}) — вызывает bot-message в начале runTelegramDispatchTurn (часть 2/2). Через
-//     ackAfterSeconds (дефолт 45) без финала → answerGuestQuery плейсхолдером (placeholderText [+ etaText]) → сохраняем inline_message_id.
-//     Дальше heartbeat-правки того же сообщения («⏱ 1 мин 30 с») с троттлингом (progress.minIntervalSeconds, дефолт 15, растёт до 60 с на
-//     длинных ранах; progress.enabled=false выключает). Прогресс по времени, не по событиям инструментов: для гостей in-run progress
-//     выключен guest-suppress-inrun-progress, onToolStart до бота не доходит (noteTool оставлен best-effort).
-//   • финал в deliverTextReply (guest-ветка): если у entry есть inline_message_id → editMessageText(inline_message_id, …) (rich → plain
-//     fallback); если плейсхолдер в полёте → дождаться; если таймер ещё не сработал → снять и ответить одним answerGuestQuery как раньше.
-//     Истёк TTL без сохранённого id → прежнее поведение (guard: дроп без sendMessage).
-//   • settle({failed}) в finally runTelegramDispatchTurn: таймеры снимаются; если плейсхолдер стоит, а финала не было — правка «⚠️ …» /
-//     «обработано без текста». Entry живёт retentionMinutes (дефолт 360) ради поздних payload'ов той же guest-сессии (announce субагента,
-//     который иначе дропает guest-no-chat-fallback): deliverReplyPlan дописывает их в то же inline-сообщение (appendLater, лимит appendMax).
-//   • Rich: Bot API 10.3 разрешает InputRichMessageContent в результатах guest-query и rich_message в editMessageText; chunk.richMessage
-//     (planTelegramTextDeliveryPages) уже InputRichMessage {blocks, skip_entity_detection?} → уходит как есть, если richMessages включены,
-//     rules.rich.enabled и в блоках нет медиа (upload для inline запрещён); любая ошибка rich → повтор plain (запрос ещё не отвечен /
-//     правка не применена). Текст > 4096 → обрезка с пометкой (второго сообщения у гостя нет, ссылку дать некуда — обосновано в отчёте).
-// Файл правил (горячий, кэш по mtime+size, один statSync на обращение): <OPENCLAW_STATE_DIR | $HOME/.openclaw>/hotfix-guest-ack.json
-//   { "enabled": true, "ackAfterSeconds": 45, "placeholderText": "Принял, работаю…", "etaText": "", "progress": { "enabled": true,
-//     "minIntervalSeconds": 15 }, "rich": { "enabled": true }, "appendLater": true, "appendMax": 5, "retentionMinutes": 360 }
-//   нет файла / битый JSON → дефолты + один warn; enabled:false → реестр ничего не делает (поведение как до порта).
-//   Путь — env OPENCLAW_HOTFIX_GUEST_ACK_FILE (офлайн-репро; читается при загрузке модуля).
-// 2026-10-04 (v2 реестра, вместе с guest-announce-final-inline): registry.appendBySession(sessionKey,
-//   texts, {linkPreview}) — вход для финала рана guest-сессии, который доставляет ядро (deliverAgentCommandResult: announce/settle-ход субагента;
-//   раньше такой финал шёл бы в чат адресата записи сессии = DM владельца). Append заменяет служебный текст settle (entry.serviceText), при
-//   переполнении 4096 ужимает старый текст, а не новый итог; причины отказа возвращаются вызывающему для лога.
-// 2026-10-04 (v3 реестра): append/replace в inline-сообщении гостя — rich. Реестр хранит исходный
-//   markdown документа (entry.lastSource) и параметры рендера (entry.richMessages/tableMode: из turn при arm, из params при финале); объединённый
-//   документ (старый источник + новый итог, либо только новый при замене служебного текста) собирается тем же конвейером, что chunk.richMessage
-//   обычных ответов — planTelegramTextDeliveryPages (импорт чанка из send-*) с maxChars=4096 → editMessageText(inline_message_id, rich_message);
-//   любая ошибка rich → повтор plain отрендеренным plainText страницы (без markdown-звёздочек), лог «rich append failed, retrying plain».
-//   Лимит 4096 считается по итоговому тексту документа (одна страница плана); приоритет у нового итога; обрезка по границам блоков markdown
-//   (пустая строка вне ```-fence): сначала с конца старого текста (маркер «…»), затем с конца нового (пометка «[Ответ обрезан…]»), и только
-//   один неделимый блок длиннее лимита режется по символам (truncateTelegramGuestText). Heartbeat/плейсхолдер остаются plain; гонка
-//   «heartbeat в полёте поверх финала» закрыта: claimFinal/settle ждут entry.progressInflight, колбэк heartbeat проверяет entry.claimed.
-// В чанке уже есть: formatErrorMessage, logVerbose, fetch (global), planTelegramTextDeliveryPages (send-*), normalizeTelegramGuestPlainText/
-// TELEGRAM_GUEST_TEXT_LIMIT/truncateTelegramGuestText/buildTelegramGuestTextResult/answerTelegramGuestQuery (порты выше). Добавляется import fs (node:fs).
-// Kit v1.2.0: the rules file path is not hard-coded. Runtime resolution inside the patched bundle:
-//   OPENCLAW_HOTFIX_GUEST_ACK_FILE, else <OPENCLAW_STATE_DIR | $HOME/.openclaw>/hotfix-guest-ack.json
-import { replaceOnce, insertBefore, contains, notContains, rulesFileExpression } from "../lib/patch-helpers.mjs";
+// Problem: Telegram Guest Mode allows one answer per guest query (answerGuestQuery) and the query TTL is not
+// documented (answers were accepted for up to ~250 s in practice). A long run (web search, sub-agents, 15+ min)
+// hits "query is too old"; guest-single-answer-guard then drops the reply and the guest sees nothing.
+// Fix: an ack-state registry on globalThis.__openclawHotfixGuestAck (shared by the bot-message and delivery
+// chunks without new chunk exports):
+//   • arm({bot, token, runtime, guestQueryId, sessionKey, richMessages, tableMode}) — called by bot-message at
+//     the start of runTelegramDispatchTurn. After ackAfterSeconds (default 45) without a final the query is
+//     answered with a placeholder (placeholderText [+ etaText]) and inline_message_id is stored; heartbeat edits
+//     of that message ("⏱ 1m 30s") follow with throttling (progress.minIntervalSeconds, default 15, growing to
+//     60 s on long runs; progress.enabled=false disables). Progress is time-based: in-run progress is off for
+//     guests (guest-suppress-inrun-progress), so onToolStart never reaches the bot (noteTool stays best-effort).
+//   • final in deliverTextReply (guest branch): with a stored inline_message_id → editMessageText by id (rich →
+//     plain fallback); placeholder in flight → wait for it; timer not fired yet → cancel and answer once with
+//     answerGuestQuery as before. Expired TTL without a stored id → previous behaviour (drop, no sendMessage).
+//   • settle({failed}) in the finally of runTelegramDispatchTurn: timers cleared; placeholder without a final →
+//     settleFailedText / settleEmptyText. The entry lives retentionMinutes (default 360) for late payloads of
+//     the same guest session (sub-agent announce finals, otherwise dropped by guest-no-chat-fallback):
+//     deliverReplyPlan appends them to the same inline message (appendLater, appendMax).
+//   • Rich: Bot API 10.3 accepts InputRichMessageContent in guest-query results and rich_message in
+//     editMessageText; chunk.richMessage from planTelegramTextDeliveryPages is sent as is when richMessages is
+//     on for the account, rules.rich.enabled and the blocks carry no media (uploads are impossible for inline
+//     messages); any rich error → plain retry (the query is still unanswered / the edit not applied). Text over
+//     4096 is trimmed with a marker (a guest has no second message).
+//   • appendBySession(sessionKey, texts, {linkPreview}) — entry for finals delivered by the core
+//     (deliverAgentCommandResult: announce/settle turn of a sub-agent; see guest-announce-final-inline). The
+//     append replaces the settle service text (entry.serviceText); on overflow the old text is trimmed, not
+//     the new result; refusal reasons are returned to the caller for logging.
+//   • Rich append/replace: the registry keeps the markdown source of the document (entry.lastSource) and the
+//     render parameters (entry.richMessages/tableMode: from the turn at arm, from params at the final); the
+//     combined document (old source + new result, or only the new result when replacing service text) is
+//     built by the same pipeline as chunk.richMessage of regular replies — planTelegramTextDeliveryPages
+//     (imported by the chunk from send-*) with maxChars=4096 → editMessageText(rich_message); rich error →
+//     plain retry with the page's plainText. The 4096 limit is enforced on the resulting text (one page);
+//     the new result has priority; trimming happens on markdown block boundaries (blank line outside a
+//     ```-fence): first from the end of the old text ("…"), then from the end of the new text (truncatedNote),
+//     and only a single indivisible block longer than the limit is cut by characters
+//     (truncateTelegramGuestText). Heartbeat and placeholder stay plain; the "heartbeat in flight over the
+//     final" race is closed: claimFinal/settle await entry.progressInflight, the heartbeat checks entry.claimed.
+// Rules file (hot, mtime+size cache, one statSync per access): OPENCLAW_HOTFIX_GUEST_ACK_FILE, else
+//   <OPENCLAW_STATE_DIR | $HOME/.openclaw>/hotfix-guest-ack.json
+//   { "enabled": true, "ackAfterSeconds": 45, "placeholderText": "Working on it…", "etaText": "",
+//     "progress": { "enabled": true, "minIntervalSeconds": 15 }, "rich": { "enabled": true }, "appendLater": true,
+//     "appendMax": 5, "retentionMinutes": 360, "truncatedNote": "…", "settleFailedText": "…", "settleEmptyText": "…" }
+//   missing file / invalid JSON → defaults plus one warning; enabled:false → the registry does nothing.
+//   User-facing strings default to English; translations live in the rules file (see examples/).
+// Available in the chunk: formatErrorMessage, logVerbose, fetch (global), planTelegramTextDeliveryPages (send-*),
+// normalizeTelegramGuestPlainText / TELEGRAM_GUEST_TEXT_LIMIT / truncateTelegramGuestText /
+// buildTelegramGuestTextResult / answerTelegramGuestQuery / hotfixTelegramApiRoot (modules above).
+// Adds `import fs from "node:fs"` to the chunk.
+import { replaceOnce, replaceRegion, contains, notContains, count, rulesFileExpression } from "../lib/patch-helpers.mjs";
 import { patch as basePatch } from "./telegram-guest-mode-delivery.mjs";
 import { patch as plainPatch } from "./guest-plain-delivery-normalize.mjs";
 import { patch as guardPatch } from "./guest-single-answer-guard.mjs";
 import { patch as noChatPatch } from "./guest-no-chat-fallback.mjs";
 const MARK = "hotfix: guest-ack-edit";
 export const label = "guest-ack-edit-delivery";
-export const verdict = "port";
 export const target = { key: "delivery", label: "Telegram delivery.replies bundle", needles: ["async function deliverTextReply(params) {", "async function deliverReplyPlan(params, createPlan) {", "function filterEmptyTelegramTextChunks(chunks) {"] };
 const FS_IMPORT = "import fs from \"node:fs\"; // hotfix: guest-ack-edit (rules file)\n";
 const REGION_START = `//#region ${MARK} (registry)`;
-const REGION_END = "//#endregion\n";
+export const REGISTRY_DEFAULT_TEXTS = Object.freeze({
+  placeholderText: "Working on it…",
+  truncatedNote: "[Reply truncated: Telegram guest mode limit.]",
+  settleFailedText: "⚠️ The request could not be processed. Please try again.",
+  settleEmptyText: "The request was processed but produced no text reply. Please rephrase it.",
+});
 const REGISTRY = [
-  `${REGION_START} 2026-10-04 — реестр плейсхолдеров guest-query: таймер → answerGuestQuery(плейсхолдер) → heartbeat-правки → финал editMessageText(inline_message_id)`,
+  `${REGION_START} v4: guest-query placeholder registry — timer → answerGuestQuery(placeholder) → heartbeat edits → final editMessageText(inline_message_id); user-facing strings come from the rules file`,
   `const HOTFIX_GUEST_ACK_FILE = ${rulesFileExpression("OPENCLAW_HOTFIX_GUEST_ACK_FILE", "hotfix-guest-ack.json")};`,
   "const HOTFIX_GUEST_ACK_DEFAULTS = Object.freeze({",
   "\tenabled: true,",
   "\tackAfterSeconds: 45,",
-  "\tplaceholderText: \"Принял, работаю…\",",
+  `\tplaceholderText: ${JSON.stringify(REGISTRY_DEFAULT_TEXTS.placeholderText)},`,
   "\tetaText: \"\",",
   "\tprogressEnabled: true,",
   "\tprogressMinIntervalSeconds: 15,",
   "\trichEnabled: true,",
   "\tappendLater: true,",
   "\tappendMax: 5,",
-  "\tretentionMinutes: 360",
+  "\tretentionMinutes: 360,",
+  `\ttruncatedNote: ${JSON.stringify(REGISTRY_DEFAULT_TEXTS.truncatedNote)},`,
+  `\tsettleFailedText: ${JSON.stringify(REGISTRY_DEFAULT_TEXTS.settleFailedText)},`,
+  `\tsettleEmptyText: ${JSON.stringify(REGISTRY_DEFAULT_TEXTS.settleEmptyText)}`,
   "});",
   "const HOTFIX_GUEST_ACK_EDIT_UNCHANGED_RE = /message is not modified/i;",
   "const HOTFIX_GUEST_ACK_EDIT_GONE_RE = /MESSAGE_ID_INVALID|message to edit not found|message can't be edited|inline message id is invalid/i;",
@@ -78,6 +93,9 @@ const REGISTRY = [
   "\tconst n = typeof value === \"number\" ? value : typeof value === \"string\" && value.trim() ? Number(value) : NaN;",
   "\tif (!Number.isFinite(n)) return fallback;",
   "\treturn Math.min(max, Math.max(min, n));",
+  "}",
+  "function hotfixGuestAckText(value, fallback) {",
+  "\treturn typeof value === \"string\" && value.trim() ? value.trim() : fallback;",
   "}",
   "function hotfixGuestAckWarnOnce(kind, detail) {",
   "\tif (hotfixGuestAckRulesCache.warned === kind) return;",
@@ -106,14 +124,17 @@ const REGISTRY = [
   "\t\trules = Object.freeze({",
   "\t\t\tenabled: parsed.enabled !== false,",
   "\t\t\tackAfterSeconds: hotfixGuestAckNumber(parsed.ackAfterSeconds, d.ackAfterSeconds, 3, 600),",
-  "\t\t\tplaceholderText: typeof parsed.placeholderText === \"string\" && parsed.placeholderText.trim() ? parsed.placeholderText.trim() : d.placeholderText,",
+  "\t\t\tplaceholderText: hotfixGuestAckText(parsed.placeholderText, d.placeholderText),",
   "\t\t\tetaText: typeof parsed.etaText === \"string\" ? parsed.etaText.trim() : d.etaText,",
   "\t\t\tprogressEnabled: parsed.progress?.enabled !== false,",
   "\t\t\tprogressMinIntervalSeconds: hotfixGuestAckNumber(parsed.progress?.minIntervalSeconds, d.progressMinIntervalSeconds, 10, 600),",
   "\t\t\trichEnabled: parsed.rich?.enabled !== false,",
   "\t\t\tappendLater: parsed.appendLater !== false,",
   "\t\t\tappendMax: hotfixGuestAckNumber(parsed.appendMax, d.appendMax, 0, 50),",
-  "\t\t\tretentionMinutes: hotfixGuestAckNumber(parsed.retentionMinutes, d.retentionMinutes, 1, 2880)",
+  "\t\t\tretentionMinutes: hotfixGuestAckNumber(parsed.retentionMinutes, d.retentionMinutes, 1, 2880),",
+  "\t\t\ttruncatedNote: hotfixGuestAckText(parsed.truncatedNote, d.truncatedNote),",
+  "\t\t\tsettleFailedText: hotfixGuestAckText(parsed.settleFailedText, d.settleFailedText),",
+  "\t\t\tsettleEmptyText: hotfixGuestAckText(parsed.settleEmptyText, d.settleEmptyText)",
   "\t\t});",
   "\t\thotfixGuestAckRulesCache.warned = null;",
   "\t\tlogVerbose(`[hotfix][guest-ack] rules loaded: enabled=${rules.enabled} ackAfter=${rules.ackAfterSeconds}s progress=${rules.progressEnabled}/${rules.progressMinIntervalSeconds}s rich=${rules.richEnabled} appendLater=${rules.appendLater}`);",
@@ -128,7 +149,7 @@ const REGISTRY = [
   "\tconst total = Math.max(0, Math.round(ms / 1e3));",
   "\tconst m = Math.floor(total / 60);",
   "\tconst s = total % 60;",
-  "\treturn m > 0 ? `${m} мин ${s} с` : `${s} с`;",
+  "\treturn m > 0 ? `${m}m ${s}s` : `${s}s`;",
   "}",
   "function hotfixGuestAckHasMediaBlocks(blocks) {",
   "\tconst walk = (list) => Array.isArray(list) && list.some((block) => {",
@@ -144,13 +165,13 @@ const REGISTRY = [
   "\tif (!rich || !Array.isArray(rich.blocks) || rich.blocks.length === 0 || hotfixGuestAckHasMediaBlocks(rich.blocks)) return;",
   "\treturn rich;",
   "}",
-  "// v3: rich для append/replace — тот же фильтр, но richMessages берётся из entry (turn при arm / params при финале), а не из params.",
+  "// Rich for append/replace: same filter, but richMessages comes from the entry (turn at arm / params at the final).",
   "function hotfixGuestAckRichForEntry(entry, richMessage) {",
   "\tif (!entry?.rules?.richEnabled || entry.richMessages !== true) return;",
   "\tif (!richMessage || !Array.isArray(richMessage.blocks) || richMessage.blocks.length === 0 || hotfixGuestAckHasMediaBlocks(richMessage.blocks)) return;",
   "\treturn richMessage;",
   "}",
-  "// v3: блоки markdown — куски между пустыми строками ВНЕ ```-fence (таблица/список/абзац/код целиком), чтобы обрезка не рвала разметку.",
+  "// Markdown blocks = chunks between blank lines OUTSIDE ```-fences (a table/list/paragraph/code block as a whole), so trimming never tears markup.",
   "function hotfixGuestAckSplitBlocks(markdown) {",
   "\tconst blocks = [];",
   "\tlet current = [];",
@@ -167,8 +188,8 @@ const REGISTRY = [
   "\tif (current.length) blocks.push(current.join(\"\\n\"));",
   "\treturn blocks;",
   "}",
-  "// v3: документ гостя из markdown тем же конвейером, что chunk.richMessage обычных ответов (planTelegramTextDeliveryPages из send-*):",
-  "// одна страница с maxChars=4096 → fits; plainText страницы — plain-fallback без markdown-разметки.",
+  "// Guest document from markdown through the same pipeline as chunk.richMessage of regular replies (planTelegramTextDeliveryPages from send-*):",
+  "// one page with maxChars=4096 → fits; the page's plainText is the plain fallback without markdown markup.",
   "function hotfixGuestAckPlanDocument(entry, source, linkPreview) {",
   "\tconst text = String(source ?? \"\");",
   "\tif (!text.trim()) return { source: text, plainText: \"\", richMessage: void 0, fits: true };",
@@ -183,10 +204,10 @@ const REGISTRY = [
   "\tconst plainText = typeof page?.plainText === \"string\" && page.plainText.trim() ? page.plainText : text;",
   "\treturn { source: text, plainText, richMessage: page?.richMessage, fits: pages.length <= 1 && plainText.length <= TELEGRAM_GUEST_TEXT_LIMIT };",
   "}",
-  "const HOTFIX_GUEST_ACK_TRUNCATED_NOTE = \"[Ответ обрезан из-за лимита Telegram guest mode.]\";",
-  "// v3: объединённый документ prev + add в лимит 4096 по ИТОГОВОМУ тексту. Приоритет у нового итога: (1) целиком; (2) с конца старого текста",
-  "// снимаются блоки, на их месте «…»; (3) старый отброшен, с конца нового снимаются блоки, в конец — пометка об обрезке; (4) единственный",
-  "// неделимый блок длиннее лимита → truncateTelegramGuestText по символам (единственный случай, где разметка может порваться).",
+  "// Combined document prev + add within the 4096 limit of the RESULTING text. The new result has priority: (1) whole; (2) blocks are",
+  "// dropped from the end of the old text, replaced by \"…\"; (3) old text dropped, blocks dropped from the end of the new text plus the",
+  "// truncation note; (4) a single indivisible block longer than the limit → truncateTelegramGuestText by characters (the only case",
+  "// where markup may tear).",
   "function hotfixGuestAckComposeDocument(entry, prevSource, addSource, linkPreview) {",
   "\tconst join = (a, b) => a && b ? `${a}\\n\\n${b}` : a || b;",
   "\tconst prev = String(prevSource ?? \"\").trim();",
@@ -202,16 +223,18 @@ const REGISTRY = [
   "\tconst addBlocks = hotfixGuestAckSplitBlocks(add);",
   "\twhile (addBlocks.length > 1) {",
   "\t\taddBlocks.pop();",
-  "\t\tdoc = hotfixGuestAckPlanDocument(entry, join(addBlocks.join(\"\\n\\n\"), HOTFIX_GUEST_ACK_TRUNCATED_NOTE), linkPreview);",
+  "\t\tdoc = hotfixGuestAckPlanDocument(entry, join(addBlocks.join(\"\\n\\n\"), entry?.rules?.truncatedNote ?? HOTFIX_GUEST_ACK_DEFAULTS.truncatedNote), linkPreview);",
   "\t\tif (doc.fits) return { ...doc, truncated: \"new\" };",
   "\t}",
   "\tdoc = hotfixGuestAckPlanDocument(entry, truncateTelegramGuestText(addBlocks[0] ?? add), linkPreview);",
   "\tif (!doc.fits) doc = { ...doc, plainText: truncateTelegramGuestText(doc.plainText), richMessage: void 0 };",
   "\treturn { ...doc, truncated: \"chars\" };",
   "}",
-  "async function hotfixGuestAckEditViaOfficialApi(token, body) {",
+  "// Direct Bot API fallback (only when the bot object has no raw API); honours the configured apiRoot (hotfixTelegramApiRoot).",
+  "async function hotfixGuestAckEditViaOfficialApi(entry, body) {",
+  "\tconst token = entry?.token;",
   "\tif (!token?.trim()) throw new Error(\"telegram editMessageText fallback unavailable: missing bot token\");",
-  "\tconst res = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, { method: \"POST\", headers: { \"content-type\": \"application/json\" }, body: JSON.stringify(body) });",
+  "\tconst res = await fetch(`${hotfixTelegramApiRoot(entry.bot)}/bot${token}/editMessageText`, { method: \"POST\", headers: { \"content-type\": \"application/json\" }, body: JSON.stringify(body) });",
   "\tconst data = await res.json().catch(() => null);",
   "\tif (!res.ok || !data?.ok) throw new Error(`telegram editMessageText failed: ${typeof data?.description === \"string\" ? data.description : `HTTP ${res.status}`}`);",
   "\treturn data.result;",
@@ -225,7 +248,7 @@ const REGISTRY = [
   "\t};",
   "\tconst api = entry.bot?.api;",
   "\tif (typeof api?.raw?.editMessageText === \"function\") return await api.raw.editMessageText(body);",
-  "\treturn await hotfixGuestAckEditViaOfficialApi(entry.token, body);",
+  "\treturn await hotfixGuestAckEditViaOfficialApi(entry, body);",
   "}",
   "const hotfixGuestAckRegistry = globalThis.__openclawHotfixGuestAck ?? (globalThis.__openclawHotfixGuestAck = { byQuery: new Map(), bySession: new Map() });",
   "function hotfixGuestAckLog(entry, message) {",
@@ -255,7 +278,7 @@ const REGISTRY = [
   "\tentry.progressTimer = setTimeout(async () => {",
   "\t\tentry.progressTimer = void 0;",
   "\t\tif (entry.state !== \"placeholder\" || entry.settled || entry.claimed) return;",
-  "\t\t// v3: правка heartbeat всегда plain (плейсхолдер rich не содержит); claimFinal/settle ждут progressInflight, чтобы heartbeat не лёг поверх финала",
+  "\t\t// heartbeat edits are always plain (the placeholder carries no rich content); claimFinal/settle await progressInflight so a heartbeat never lands over the final",
   "\t\tentry.progressInflight = hotfixGuestAckEditInline(entry, { text: hotfixGuestAckPlaceholderText(entry, true) });",
   "\t\ttry {",
   "\t\t\tawait entry.progressInflight;",
@@ -316,7 +339,7 @@ const REGISTRY = [
   "\t\tbot: input.bot,",
   "\t\ttoken: typeof input.token === \"string\" ? input.token : void 0,",
   "\t\truntime: input.runtime,",
-  "\t\trichMessages: input.richMessages === true, // v3: rich для append/replace (turn.richMessages аккаунта; финал в deliverTextReply уточняет по params)",
+  "\t\trichMessages: input.richMessages === true, // rich for append/replace (turn.richMessages of the account; the final in deliverTextReply refines it from params)",
   "\t\ttableMode: input.tableMode,",
   "\t\trules,",
   "\t\tstate: \"armed\",",
@@ -336,14 +359,14 @@ const REGISTRY = [
   "\t\t\tif (entry.inflight) await entry.inflight.catch(() => void 0);",
   "\t\t\tif (entry.state === \"armed\") { hotfixGuestAckClearTimers(entry); entry.state = \"closed\"; hotfixGuestAckRegistry.byQuery.delete(guestQueryId); return; }",
   "\t\t\tif (entry.progressTimer) { clearTimeout(entry.progressTimer); entry.progressTimer = void 0; }",
-  "\t\t\tif (entry.progressInflight) await entry.progressInflight.catch(() => void 0); // v3: heartbeat в полёте не должен лечь поверх служебного текста",
+  "\t\t\tif (entry.progressInflight) await entry.progressInflight.catch(() => void 0); // a heartbeat in flight must not land over the service text",
   "\t\t\tif (entry.state !== \"placeholder\") return;",
-  "\t\t\tconst text = info?.failed ? \"⚠️ Не удалось обработать запрос. Попробуйте ещё раз.\" : \"Запрос обработан, но текстового ответа не получилось. Попробуйте переформулировать.\";",
+  "\t\t\tconst text = info?.failed ? entry.rules.settleFailedText : entry.rules.settleEmptyText;",
   "\t\t\ttry {",
   "\t\t\t\tawait hotfixGuestAckEditInline(entry, { text });",
   "\t\t\t\tentry.lastText = text;",
   "\t\t\t\tentry.lastSource = text;",
-  "\t\t\t\tentry.serviceText = true; // поздний итог (announce субагента) заменит служебный текст, а не допишется к нему",
+  "\t\t\t\tentry.serviceText = true; // a late result (sub-agent announce) replaces the service text instead of appending to it",
   "\t\t\t\thotfixGuestAckLog(entry, `settled without final: ${info?.failed ? \"run failed\" : \"no visible reply\"}`);",
   "\t\t\t} catch (err) {",
   "\t\t\t\thotfixGuestAckLog(entry, `settle edit failed: ${formatErrorMessage(err)}`);",
@@ -355,18 +378,18 @@ const REGISTRY = [
   "\tif (entry.sessionKey) hotfixGuestAckRegistry.bySession.set(entry.sessionKey, entry);",
   "\treturn entry.handle;",
   "};",
-  "// Финал: вернуть { inlineMessageId } если плейсхолдер уже стоит (нужна правка), иначе undefined (отвечать answerGuestQuery); таймер снимается.",
+  "// Final: return { inlineMessageId } when the placeholder is already up (an edit is needed), otherwise undefined (answer with answerGuestQuery); the timer is cleared.",
   "async function hotfixGuestAckClaimFinal(entry) {",
   "\tif (!entry) return;",
   "\tif (entry.state === \"armed\") { hotfixGuestAckClearTimers(entry); entry.state = \"claimed\"; return; }",
   "\tif (entry.inflight) await entry.inflight.catch(() => void 0);",
-  "\tentry.claimed = true; // v3: новые heartbeat-правки не стартуют",
+  "\tentry.claimed = true; // no new heartbeat edits start",
   "\tif (entry.progressTimer) { clearTimeout(entry.progressTimer); entry.progressTimer = void 0; }",
-  "\tif (entry.progressInflight) await entry.progressInflight.catch(() => void 0); // v3: дождаться heartbeat в полёте, иначе он ляжет поверх финала",
+  "\tif (entry.progressInflight) await entry.progressInflight.catch(() => void 0); // wait for a heartbeat in flight, otherwise it lands over the final",
   "\tif (entry.state === \"placeholder\" && entry.inlineMessageId) return { inlineMessageId: entry.inlineMessageId };",
   "\treturn;",
   "}",
-  "// v3: source — исходный markdown финала (для пересборки документа при append), render — {richMessages, tableMode} из params доставки.",
+  "// source — the final's markdown source (for rebuilding the document on append), render — {richMessages, tableMode} of the delivery params.",
   "function hotfixGuestAckMarkAnswered(entry, inlineMessageId, text, source, render) {",
   "\tif (!entry) return;",
   "\tentry.state = \"answered\";",
@@ -380,11 +403,11 @@ const REGISTRY = [
   "\tentry.serviceText = false;",
   "\tentry.answeredAt = Date.now();",
   "}",
-  "// Дописать текст(ы) в уже отвеченное inline-сообщение (второй payload того же рана или поздний payload той же guest-сессии — announce субагента).",
-  "// Служебный текст settle («Запрос обработан, но текстового ответа…» / «⚠️ …») заменяется, не дописывается. v3: документ = старый источник",
-  "// (markdown, entry.lastSource) + новый итог, собирается hotfixGuestAckComposeDocument (лимит 4096 по итоговому тексту, обрезка по блокам,",
-  "// приоритет у нового) и правится rich_message (если rich разрешён для entry и в блоках нет медиа); ошибка rich → повтор plain (plainText",
-  "// страницы, без markdown-разметки). options: { linkPreview, richMessages, tableMode } — уточняют параметры рендера entry, если переданы.",
+  "// Append text(s) to an already answered inline message (a second payload of the same run, or a late payload of the same guest session —",
+  "// a sub-agent announce). The settle service text is replaced, not appended to. Document = old source (markdown, entry.lastSource) + new",
+  "// result, built by hotfixGuestAckComposeDocument (4096 limit on the resulting text, block-wise trimming, new text first) and edited as",
+  "// rich_message (when rich is allowed for the entry and the blocks carry no media); rich error → plain retry (page plainText, no markdown",
+  "// markup). options: { linkPreview, richMessages, tableMode } refine the entry's render parameters when given.",
   "async function hotfixGuestAckAppendToAnswered(entry, texts, options) {",
   "\tif (!entry || entry.state !== \"answered\" || !entry.inlineMessageId || !entry.rules.appendLater || entry.appends >= entry.rules.appendMax || entry.expiresAt <= Date.now()) return;",
   "\tconst clean = (Array.isArray(texts) ? texts : []).map((text) => typeof text === \"string\" ? normalizeTelegramGuestPlainText(text).trim() : \"\").filter(Boolean);",
@@ -426,8 +449,8 @@ const REGISTRY = [
   "\thotfixGuestAckLog(entry, `payload appended to inline message (${entry.appends}/${entry.rules.appendMax}${prev ? \"\" : \", replaced service/empty text\"}) rich=${usedRich} truncated=${doc.truncated} chars=${plainText.length}`);",
   "\treturn { delivered: true, inlineMessageId: entry.inlineMessageId, rich: usedRich };",
   "}",
-  "// Финал рана guest-сессии, доставляемый ядром (deliverAgentCommandResult: announce/settle-ход субагента, deliver:true) — порт",
-  "// guest-announce-final-inline. Возвращает { delivered: true, inlineMessageId } либо { delivered: false, reason } (вызывающий дропает payload с логом).",
+  "// Final of a guest-session run delivered by the core (deliverAgentCommandResult: announce/settle turn of a sub-agent, deliver:true) —",
+  "// see guest-announce-final-inline. Returns { delivered: true, inlineMessageId } or { delivered: false, reason } (the caller drops the payload with a log line).",
   "hotfixGuestAckRegistry.appendBySession = async (sessionKey, texts, options) => {",
   "\tif (!loadHotfixGuestAckRules().enabled) return { delivered: false, reason: \"guest-ack disabled (rules.enabled=false)\" };",
   "\tconst entry = hotfixGuestAckRegistry.resolveBySession(sessionKey);",
@@ -452,7 +475,8 @@ const REGISTRY = [
   "//#endregion",
   "",
 ].join("\n");
-// Guest-ветка deliverTextReply после каскадов telegram-guest-mode-delivery + guest-plain-delivery-normalize + guest-single-answer-guard (прод 9.7 байт-в-байт).
+// Guest branch of deliverTextReply after the cascade telegram-guest-mode-delivery + guest-plain-delivery-normalize +
+// guest-single-answer-guard (pristine 2026.9.7 chunk, byte for byte).
 const GUEST_BRANCH_OLD = `\tif (params.guestQueryId) {
 \t\tif (params.progress.guestAnswered) return;
 \t\tconst guestReplyText = normalizeTelegramGuestPlainText(params.text);
@@ -460,7 +484,7 @@ const GUEST_BRANCH_OLD = `\tif (params.guestQueryId) {
 \t\tconst firstChunk = guestChunks[0];
 \t\tconst useHtml = false;
 \t\tconst fallbackText = normalizeTelegramGuestPlainText(firstChunk?.plainText ?? guestReplyText);
-\t\tconst text = guestChunks.length > 1 ? \`\${fallbackText.trimEnd()}\\n\\n[Ответ обрезан из-за лимита Telegram guest mode.]\` : fallbackText;
+\t\tconst text = guestChunks.length > 1 ? \`\${fallbackText.trimEnd()}\\n\\n\${TELEGRAM_GUEST_TRUNCATED_NOTE}\` : fallbackText;
 \t\tlet guestDeliveredMessageId;
 \t\ttry {
 \t\t\tguestDeliveredMessageId = await sendTelegramGuestText(params.bot, params.guestQueryId, text, params.runtime, {
@@ -487,7 +511,7 @@ const GUEST_BRANCH_OLD = `\tif (params.guestQueryId) {
 \t\t//#endregion
 \t}
 `;
-// v1 ветки: append второго payload plain-текстом, MarkAnswered без источника. Остаётся для апгрейда v1 → v2 на пропатченном чанке.
+// v1 branch (first revision): plain append of a second payload, MarkAnswered without a source. Kept for the in-place upgrade v1 → current.
 const GUEST_BRANCH_V1 = `\tif (params.guestQueryId) {
 \t\tif (params.progress.guestAnswered) return;
 \t\t//#region ${MARK} (2026-10-04): финал правит плейсхолдер по inline_message_id; rich → plain fallback; без плейсхолдера — один answerGuestQuery
@@ -570,45 +594,53 @@ const GUEST_BRANCH_V1 = `\tif (params.guestQueryId) {
 \t\t//#endregion
 \t}
 `;
-// v2 ветки (v3 реестра): второй payload того же query дописывается как markdown-источник (rich через composeDocument), MarkAnswered получает
-// исходный markdown финала и параметры рендера — чтобы поздний append (announce субагента) пересобрал документ целиком.
-const GUEST_BRANCH_V1_TO_V2 = [
+const applyEdits = (template, edits, name) => edits.reduce((acc, [from, to]) => {
+  if (acc.split(from).length !== 2) throw new Error(`guest-ack-edit: ${name} template must contain exactly once: ${from}`);
+  return acc.replace(from, to);
+}, template);
+// v2 branch (kit v1.2.0): a second payload of the same query is appended as a markdown source (rich through composeDocument);
+// MarkAnswered receives the final's markdown source and the render parameters so a late append (sub-agent announce) rebuilds the document.
+const GUEST_BRANCH_V2 = applyEdits(GUEST_BRANCH_V1, [
   ["await hotfixGuestAckAppendToAnswered(guestAckEntry, [text], params.linkPreview);", "await hotfixGuestAckAppendToAnswered(guestAckEntry, [guestReplyText], { linkPreview: params.linkPreview, richMessages: params.richMessages, tableMode: params.tableMode }); // v3: markdown-источник → rich"],
   ["hotfixGuestAckMarkAnswered(guestAckEntry, guestPlaceholder.inlineMessageId, text);", "hotfixGuestAckMarkAnswered(guestAckEntry, guestPlaceholder.inlineMessageId, text, guestReplyText, { richMessages: params.richMessages, tableMode: params.tableMode });"],
   ["hotfixGuestAckMarkAnswered(guestAckEntry, guestDeliveredMessageId, text);", "hotfixGuestAckMarkAnswered(guestAckEntry, guestDeliveredMessageId, text, guestReplyText, { richMessages: params.richMessages, tableMode: params.tableMode });"],
-];
-const GUEST_BRANCH_NEW = GUEST_BRANCH_V1_TO_V2.reduce((acc, [from, to]) => {
-  if (acc.split(from).length !== 2) throw new Error(`guest-ack-edit: v1 branch template must contain exactly once: ${from}`);
-  return acc.replace(from, to);
-}, GUEST_BRANCH_V1);
-// Поздний payload guest-сессии (без guestQueryId): перед guard'ом guest-no-chat-fallback — попытка дописать в inline-сообщение.
+], "v1");
+// v3 branch (kit v1.2.1): English comments, truncation note and the rich-result title come from the rules / English defaults.
+const GUEST_BRANCH_NEW = applyEdits(GUEST_BRANCH_V2, [
+  [`//#region ${MARK} (2026-10-04): финал правит плейсхолдер по inline_message_id; rich → plain fallback; без плейсхолдера — один answerGuestQuery`, `//#region ${MARK} v3: the final edits the placeholder by inline_message_id; rich → plain fallback; without a placeholder — one answerGuestQuery`],
+  ["\\n\\n[Ответ обрезан из-за лимита Telegram guest mode.]`", "\\n\\n${guestAckRules.truncatedNote}`"],
+  ["// v3: markdown-источник → rich", "// markdown source → rich"],
+  ["title: \"Ответ\", input_message_content", "title: \"Reply\", input_message_content"],
+], "v2");
+// Late payload of a guest session (without guestQueryId): before the guest-no-chat-fallback guard, try to append it to the inline message.
 const PLAN_OLD = "async function deliverReplyPlan(params, createPlan) {\n\t//#region hotfix: guest-no-chat-fallback (2026-07-29; 2026-09-24 → deliverReplyPlan)\n";
-const PLAN_NEW = `async function deliverReplyPlan(params, createPlan) {
-\t//#region ${MARK} (2026-10-04): поздний payload guest-сессии (announce субагента) дописывается в уже отвеченное inline-сообщение
-\tif (!params.guestQueryId && typeof params.sessionKeyForInternalHooks === "string" && params.sessionKeyForInternalHooks.includes(":guest:")) {
+const PLAN_BODY = `\tif (!params.guestQueryId && typeof params.sessionKeyForInternalHooks === "string" && params.sessionKeyForInternalHooks.includes(":guest:")) {
 \t\tconst guestAckAppended = await hotfixGuestAckAppendLater(params);
 \t\tif (guestAckAppended) return guestAckAppended;
 \t}
 \t//#endregion
 \t//#region hotfix: guest-no-chat-fallback (2026-07-29; 2026-09-24 → deliverReplyPlan)
 `;
-const count = (s, n) => s.split(n).length - 1;
-function replaceRegistryRegion(source) {
-  const start = source.indexOf(REGION_START);
-  if (start === -1) return insertBefore(source, "async function deliverTextReply(params) {", REGISTRY, "guest-ack registry before deliverTextReply");
-  const endIdx = source.indexOf(REGION_END, start);
-  if (endIdx === -1) throw new Error("guest-ack-edit: registry region without //#endregion");
-  return `${source.slice(0, start)}${REGISTRY}${source.slice(endIdx + REGION_END.length)}`;
-}
+const PLAN_V120 = `async function deliverReplyPlan(params, createPlan) {
+\t//#region ${MARK} (2026-10-04): поздний payload guest-сессии (announce субагента) дописывается в уже отвеченное inline-сообщение
+${PLAN_BODY}`;
+const PLAN_NEW = `async function deliverReplyPlan(params, createPlan) {
+\t//#region ${MARK}: a late payload of a guest session (sub-agent announce) is appended to the already answered inline message
+${PLAN_BODY}`;
 export function patch(source) {
   let next = noChatPatch(guardPatch(plainPatch(basePatch(source))));
   if (next.includes(REGISTRY) && next.includes(GUEST_BRANCH_NEW) && next.includes(PLAN_NEW) && next.includes(FS_IMPORT)) return next;
   if (!next.includes(FS_IMPORT)) next = next.includes("import fs from \"node:fs\";") ? next : `${FS_IMPORT}${next}`;
-  if (!next.includes(REGISTRY)) next = replaceRegistryRegion(next); // свежая вставка или апгрейд версии регистра
-  if (!next.includes(GUEST_BRANCH_NEW)) next = next.includes(GUEST_BRANCH_V1)
-    ? replaceOnce(next, GUEST_BRANCH_V1, GUEST_BRANCH_NEW, "guest-ack-edit deliverTextReply guest branch v1 → v2 (markdown source for rich append)")
-    : replaceOnce(next, GUEST_BRANCH_OLD, GUEST_BRANCH_NEW, "guest-ack-edit deliverTextReply guest branch (cascade over guest delivery ports)");
-  if (!next.includes(PLAN_NEW)) next = replaceOnce(next, PLAN_OLD, PLAN_NEW, "guest-ack-edit late-append before guest-no-chat-fallback guard");
+  if (!next.includes(REGISTRY)) next = replaceRegion(next, { start: REGION_START, body: REGISTRY, anchor: "async function deliverTextReply(params) {", label: "guest-ack registry before deliverTextReply" }); // fresh insert or registry upgrade
+  if (!next.includes(GUEST_BRANCH_NEW)) {
+    const old = [GUEST_BRANCH_V2, GUEST_BRANCH_V1].find((candidate) => next.includes(candidate));
+    next = old
+      ? replaceOnce(next, old, GUEST_BRANCH_NEW, "guest-ack-edit deliverTextReply guest branch upgrade (earlier revision → v3)")
+      : replaceOnce(next, GUEST_BRANCH_OLD, GUEST_BRANCH_NEW, "guest-ack-edit deliverTextReply guest branch (cascade over guest delivery ports)");
+  }
+  if (!next.includes(PLAN_NEW)) next = next.includes(PLAN_V120)
+    ? replaceOnce(next, PLAN_V120, PLAN_NEW, "guest-ack-edit late-append region header v1.2.0 → v1.2.1")
+    : replaceOnce(next, PLAN_OLD, PLAN_NEW, "guest-ack-edit late-append before guest-no-chat-fallback guard");
   return next;
 }
 const guestBranchOrder = (src) => {
@@ -620,36 +652,43 @@ const guestBranchOrder = (src) => {
   if (claim < 0 || answer < 0 || send < 0 || !(claim < answer && answer < send)) return "guest-ack claim must precede answerGuestQuery and sender.sendText in deliverTextReply";
   return null;
 };
-export const check = { gate: "required", assertions: [
-  contains(MARK, "маркер guest-ack-edit"),
-  contains(REGISTRY, "актуальный регион реестра целиком"),
-  contains(GUEST_BRANCH_NEW, "guest-ветка deliverTextReply с правкой плейсхолдера"),
-  contains(PLAN_NEW, "поздний append перед guard'ом guest-no-chat-fallback"),
-  contains(FS_IMPORT, "import fs для файла правил"),
+export const check = { assertions: [
+  contains(MARK, "guest-ack-edit marker"),
+  contains(REGISTRY, "current registry region (whole)"),
+  contains(GUEST_BRANCH_NEW, "deliverTextReply guest branch with placeholder edit"),
+  contains(PLAN_NEW, "late append before the guest-no-chat-fallback guard"),
+  contains(FS_IMPORT, "import fs for the rules file"),
   contains(`const HOTFIX_GUEST_ACK_FILE = ${rulesFileExpression("OPENCLAW_HOTFIX_GUEST_ACK_FILE", "hotfix-guest-ack.json")};`, "rules file resolved from env / OpenClaw state dir (not hard-coded)"),
-  (c) => /"\/[^"\n]*\/\.openclaw\/hotfix-guest-ack\.json"/.test(c) ? "unexpected hard-coded host-specific rules path" : null,
-  contains("globalThis.__openclawHotfixGuestAck", "общий реестр на globalThis"),
-  contains("input_message_content: { rich_message: guestRichMessage }", "rich-ответ гостю (InputRichMessageContent)"),
-  notContains(GUEST_BRANCH_OLD, "старая guest-ветка без ack-edit"),
-  notContains(GUEST_BRANCH_V1, "guest-ветка v1 (plain append без источника) не осталась"),
-  // v3: rich append — конвейер документа и его зависимости в чанке
-  contains("function hotfixGuestAckComposeDocument(entry, prevSource, addSource, linkPreview) {", "сборка объединённого документа гостя (v3)"),
-  contains("function hotfixGuestAckSplitBlocks(markdown) {", "разбиение markdown на блоки для обрезки (v3)"),
-  contains("rich append failed, retrying plain", "fallback rich → plain у append (v3)"),
-  contains("planTelegramTextDeliveryPages({ text, maxChars: TELEGRAM_GUEST_TEXT_LIMIT,", "документ гостя строится planTelegramTextDeliveryPages (v3)"),
-  contains("T as planTelegramTextDeliveryPages", "planTelegramTextDeliveryPages импортируется чанком из send-*"),
-  contains("entry.lastSource = ", "реестр хранит markdown-источник документа (v3)"),
-  contains("if (entry.progressInflight) await entry.progressInflight.catch(() => void 0); // v3: дождаться heartbeat в полёте", "claimFinal ждёт heartbeat в полёте (v3)"),
-  // маркеры/строки, на которые опираются assertions соседних guest-портов, должны пережить перезапись ветки
-  contains("params.progress.guestAnswered", "guard guestAnswered (telegram-guest-mode-delivery)"),
-  contains("hotfix: guest-single-answer-guard", "маркер guest-single-answer-guard сохранён"),
+  (c) => /HOTFIX_GUEST_ACK_FILE = "\//.test(c) ? "hard-coded absolute rules path" : null,
+  contains("globalThis.__openclawHotfixGuestAck", "shared registry on globalThis"),
+  contains("input_message_content: { rich_message: guestRichMessage }", "rich reply to the guest (InputRichMessageContent)"),
+  notContains(GUEST_BRANCH_OLD, "old guest branch without ack-edit"),
+  notContains(GUEST_BRANCH_V1, "guest branch v1 (plain append without source) remnant"),
+  notContains(GUEST_BRANCH_V2, "guest branch v2 (kit v1.2.0) remnant"),
+  notContains(PLAN_V120, "late-append region header of kit v1.2.0 remnant"),
+  // rich append: document pipeline and its chunk dependencies
+  contains("function hotfixGuestAckComposeDocument(entry, prevSource, addSource, linkPreview) {", "combined guest document builder"),
+  contains("function hotfixGuestAckSplitBlocks(markdown) {", "markdown block splitter for trimming"),
+  contains("rich append failed, retrying plain", "rich → plain fallback of append"),
+  contains("planTelegramTextDeliveryPages({ text, maxChars: TELEGRAM_GUEST_TEXT_LIMIT,", "guest document built by planTelegramTextDeliveryPages"),
+  contains("T as planTelegramTextDeliveryPages", "planTelegramTextDeliveryPages imported by the chunk from send-*"),
+  contains("entry.lastSource = ", "registry keeps the markdown source of the document"),
+  contains("if (entry.progressInflight) await entry.progressInflight.catch(() => void 0); // wait for a heartbeat in flight", "claimFinal waits for a heartbeat in flight"),
+  // user-facing strings come from the rules (English defaults), the HTTP fallback uses the configured apiRoot
+  contains("settleFailedText: hotfixGuestAckText(parsed.settleFailedText, d.settleFailedText),", "settle texts configurable in rules"),
+  contains("truncatedNote: hotfixGuestAckText(parsed.truncatedNote, d.truncatedNote),", "truncation note configurable in rules"),
+  contains("fetch(`${hotfixTelegramApiRoot(entry.bot)}/bot${token}/editMessageText`", "editMessageText fallback uses the configured apiRoot"),
+  contains("function hotfixTelegramApiRoot(bot) {", "hotfixTelegramApiRoot (telegram-guest-mode-delivery)"),
+  // markers/lines the assertions of the neighbouring guest modules rely on must survive the branch rewrite
+  contains("params.progress.guestAnswered", "guestAnswered guard (telegram-guest-mode-delivery)"),
+  contains("hotfix: guest-single-answer-guard", "guest-single-answer-guard marker kept"),
   contains("parseMode: void 0,", "plain parseMode (guest-plain-delivery-normalize)"),
-  notContains("falling back to sendMessage", "sendMessage-fallback не вернулся"),
-  // зависимости в чанке
-  contains("import { t as formatErrorMessage } from \"./errors-", "formatErrorMessage в чанке"),
-  contains("import { r as logVerbose, t as danger } from \"./globals-", "logVerbose в чанке"),
+  notContains("falling back to sendMessage", "sendMessage fallback must not return"),
+  // chunk dependencies
+  contains("import { t as formatErrorMessage } from \"./errors-", "formatErrorMessage in the chunk"),
+  contains("import { r as logVerbose, t as danger } from \"./globals-", "logVerbose in the chunk"),
   guestBranchOrder,
-  (c) => count(c, REGION_START) === 1 && count(c, "hotfixGuestAckRegistry.arm = ") === 1 && count(c, "hotfixGuestAckRegistry.appendBySession = ") === 1 && count(c, "async function hotfixGuestAckClaimFinal(entry) {") === 1 && count(c, "await hotfixGuestAckAppendLater(params)") === 1 && count(c, "async function hotfixGuestAckAppendToAnswered(entry, texts, options) {") === 1 ? null : "регистр/claim/append/appendBySession объявлены или вызваны не по одному разу",
-  contains("entry.serviceText = true;", "служебный текст settle помечается для замены поздним итогом"),
-  (c) => count(c, "import fs from \"node:fs\"") === 1 ? null : `ожидался ровно один import fs, найдено ${count(c, "import fs from \"node:fs\"")}`,
+  (c) => count(c, REGION_START) === 1 && count(c, "hotfixGuestAckRegistry.arm = ") === 1 && count(c, "hotfixGuestAckRegistry.appendBySession = ") === 1 && count(c, "async function hotfixGuestAckClaimFinal(entry) {") === 1 && count(c, "await hotfixGuestAckAppendLater(params)") === 1 && count(c, "async function hotfixGuestAckAppendToAnswered(entry, texts, options) {") === 1 ? null : "registry/claim/append/appendBySession declared or called more than once",
+  contains("entry.serviceText = true;", "settle service text is marked for replacement by a late result"),
+  (c) => count(c, "import fs from \"node:fs\"") === 1 ? null : `expected exactly one import fs, found ${count(c, "import fs from \"node:fs\"")}`,
 ] };
