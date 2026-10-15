@@ -23,6 +23,8 @@ names below are the 2026.9.7 names and are informational only.
 | `subagent-settle-wake` | `subagent-announce.requester-settle-wake-*.mjs` | `guest-announce-final-text-settle-wake` (v3) | v1.2.1 |
 | `subagent-announce-delivery` | `subagent-announce-delivery-*.mjs` | `guest-announce-fallback-skip` (conditional) | 2026-10-04 |
 | `message-action-runner` | `message-action-runner-*.mjs` | `message-inbound-turn-kind-normalize`, `guest-media-staging-runner` (v4: realpath allowlist) | v1.2.1 |
+| `openclaw-tools` | `openclaw-tools-*.mjs` | `subagent-inherit-owner-scope.callsite` | v1.3.0 |
+| `sessions-spawn-tool` | `sessions-spawn-tool-*.mjs` | `subagent-inherit-owner-scope` | v1.3.0 |
 | optional `openai-fast-mode` | `minimax-fast-mode-*.mjs` | `openai-ultrafast-tier.1` | 2026-09-29 |
 | optional `builtin-openclaw` | `builtin-openclaw-*.mjs` | `guest-ultrafast-service-tier` (v2) | v1.2.1 (comments) |
 | optional `ai-openai-responses-params` | `node_modules/@openclaw/ai/dist/openai-responses-prompt-observer-internal-*.mjs` | `openai-ultrafast-tier.2` | v1.2.1 (comment) |
@@ -31,6 +33,10 @@ Version bumps in v1.2.1 change only comments, user-facing default strings and
 the two security fixes (realpath, apiRoot); the runtime logic of every module
 is otherwise the same as v1.2.0. A v1.2.0 install is upgraded in place (nine
 entries rewritten, result byte-identical to a fresh v1.2.1 apply).
+
+v1.3.0 adds the two `sessions_spawn` entries only; every other module is
+byte-identical to v1.2.1. A v1.2.1 install is upgraded in place by writing
+exactly those two chunks (result byte-identical to a fresh v1.3.0 apply).
 
 Cascades: modules that extend code inserted by an earlier module import and
 call that module's `patch()` first (`guest-plain-bot-hint`,
@@ -97,6 +103,18 @@ announce guard, staging runner) are recognized and upgraded in place.
 - **Payload hygiene**: `guestMediaDelivery` carries file names, kinds, sizes
   and reasons — no staging chat id, no `file_id`; log lines print a
   `name:mode` summary instead of the item dump.
+
+- **Sub-agent owner scope** (v1.3.0): `createOpenClawTools` forwards
+  `options.senderIsOwner` into `createSessionsSpawnTool` (call-site module);
+  the spawn context handed to `spawnSubagentDirect` carries it, and
+  `launchChildRun` spreads `scopes: ["operator.admin"]` into the gateway
+  `agent` request when `ctx.senderIsOwner === true`. The dispatcher
+  (`callSubagentGatewayWithDispatchMode`, `params.scopes ?? …`) already
+  honours an explicit scopes list — the same path used for
+  `launch.authorization`. Any other value (missing, `false`, non-boolean)
+  leaves the request untouched; collector runs are not modified. The locator
+  skips `dist/package-update-activation-recovery.mjs` (standalone updater
+  with a copy of both functions), as for every other module.
 
 ## Diagnostics
 

@@ -2,7 +2,7 @@
 
 Portable patch layer that adds Telegram Bot API guest-query support
 (`supports_guest_queries` / `guest_message` / `answerGuestQuery`, Bot API 10.3)
-to OpenClaw. Version 1.2.1 targets OpenClaw `2026.9.7`.
+to OpenClaw. Version 1.3.0 targets OpenClaw `2026.9.7`.
 
 This repository is an operator patch, not an upstream OpenClaw release. It
 patches built `dist/*.mjs` bundles in an installed OpenClaw package, so review
@@ -35,6 +35,17 @@ it before running it on a production host.
   or kept internal. Appended text is re-rendered as one rich document; the
   4096-character limit is enforced by trimming whole Markdown blocks, newest
   text first.
+- **Sub-agents of the owner keep the owner's tools.** In vanilla 2026.9.7
+  every child run started by `sessions_spawn` is launched with least-privilege
+  gateway scopes, so the gateway treats it as a non-owner and denies it the
+  owner-only core tools (`nodes`, `computer`, `mobile_ui`, `sessions`,
+  `terminal`, `portal`, `conversations_*`, `openclaw`, `screen`) — a sub-agent
+  spawned from the owner's guest turn could not, for example, reach a paired
+  node. The kit forwards the parent run's `senderIsOwner` into the spawn tool
+  and launches the child with `operator.admin` **only** when the parent run is
+  the owner's; guests who are not the owner, group chats and other senders get
+  the previous least-privilege launch. This part is not guest-specific: it
+  also applies to sub-agents of the owner's ordinary sessions.
 - **The `message` tool works from a guest turn.** Guest turns are classified
   as `user_request` (the gateway schema only accepts `user_request` /
   `room_event`), and the action runner normalizes any unknown kind.
@@ -59,8 +70,9 @@ it before running it on a production host.
 
 The author's private patch layer, from which this kit is extracted, has been
 in production since 2026-06-13 on two bots; the kit itself exists since v1.0.0
-(2026-07-19), and the 1.2.x feature set has been in production on OpenClaw
-2026.9.7 since 2026-10-04.
+(2026-07-19), the 1.2.x feature set has been in production on OpenClaw
+2026.9.7 since 2026-10-04, and the sub-agent owner scope modules of 1.3.0
+since 2026-10-15.
 
 Upstream, the feature is discussed in openclaw/openclaw#79077. Until an
 upstream implementation lands, this repository maintains the feature as a
@@ -128,7 +140,8 @@ sudo systemctl restart openclaw-gateway
 ```
 
 Re-running apply reports `status=unchanged changed=0`; an install patched by
-an earlier kit version (v1.1.x, v1.2.0) is upgraded in place. Two modules are
+an earlier kit version (v1.1.x, v1.2.x) is upgraded in place (from v1.2.1 only
+the two new `sessions_spawn` entries are written). Two modules are
 conditional and report `n/a` when they do not apply to your build:
 `telegram-guest-allowed-update` (applied only when `DEFAULT_UPDATE_TYPES` of
 the installed grammy lacks `guest_message`; grammy 1.46 pinned by 2026.9.7
@@ -251,6 +264,14 @@ params always wins. The set also patches `normalizeOpenAIServiceTier` to accept
   `message`, `sessions_spawn`, `cron` and `nodes` are available (v1.1.x denied
   them; the owner may re-tighten the list in
   `modules/guest-deny-delivery-tools.mjs`).
+- **Sub-agent scopes follow the parent.** A child run inherits owner access
+  (`scopes: ["operator.admin"]` on the gateway `agent` launch) only when the
+  parent run's `senderIsOwner` is exactly `true`; the parent's own
+  owner/non-owner derivation is not changed, and the dispatcher's existing
+  `params.scopes` contract is used — no new authorization path. The two
+  modules (`subagent-inherit-owner-scope.callsite`,
+  `subagent-inherit-owner-scope`) can be removed from `lib/plan.mjs` by an
+  operator who prefers least-privilege sub-agents even for the owner.
 - **Inline-or-dropped.** A guest answer never falls back to `sendMessage`. A
   payload of a guest session without a guest query id and without an answered
   inline message to append to is dropped with a

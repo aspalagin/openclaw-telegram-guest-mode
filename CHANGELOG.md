@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.3.0 - 2026-10-15
+
+Sub-agents spawned from the owner's runs keep the owner's tool access.
+
+- New plan entries `openclaw-tools` (`subagent-inherit-owner-scope.callsite`)
+  and `sessions-spawn-tool` (`subagent-inherit-owner-scope`). In vanilla
+  OpenClaw 2026.9.7 every child run started by `sessions_spawn` is launched
+  with least-privilege gateway scopes, so the gateway derives
+  `senderIsOwner = false` for it and denies the owner-only core tools
+  (`nodes`, `computer`, `mobile_ui`, `sessions`, `terminal`, `portal`,
+  `conversations_*`, `openclaw`, `screen`) — a sub-agent of the owner's guest
+  turn failed with `Unknown tool id: openclaw:core:nodes`. The kit now
+  forwards the parent run's `senderIsOwner` into the spawn tool and launches
+  the child with `scopes: ["operator.admin"]` only when it is exactly `true`.
+  Non-owner parents (guests who are not the owner, group chats) are
+  unchanged; collector runs are untouched.
+- Both modules carry drift guards (the spread must sit inside the `agent`
+  gateway request; `options.senderIsOwner` must still have other consumers in
+  `createOpenClawTools`). Needles describe code the modules keep intact, so
+  the chunks are located the same way on vanilla and patched installs.
+- No other module changed; a v1.2.1 install is upgraded in place by writing
+  the two new chunks (verified byte-identical to a fresh v1.3.0 apply).
+
 ## v1.2.1 - 2026-10-04
 
 Patch release after an external review of v1.2.0: privacy and portability
