@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const files = ["apply-guest-mode.mjs", "check-guest-mode.mjs", path.join("scripts", "check-syntax.mjs")];
-for (const dir of ["lib", "modules"]) for (const name of fs.readdirSync(path.join(root, dir)).filter((f) => f.endsWith(".mjs")).sort()) files.push(path.join(dir, name));
+for (const dir of ["lib", "modules", "tests"]) for (const name of fs.readdirSync(path.join(root, dir)).filter((f) => f.endsWith(".mjs")).sort()) files.push(path.join(dir, name));
 let failed = 0;
 for (const rel of files) {
   const r = spawnSync(process.execPath, ["--check", path.join(root, rel)], { encoding: "utf8" });

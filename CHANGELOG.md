@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0 — 2026-11-02
+
+- Port the existing kit to OpenClaw 2026.10.9; retire upstream-covered patches.
+- Bind guest completion text/files to their original query across queues/children.
+- Preserve partial/unknown native receipts and attachment custody; suppress guest
+  progress without claiming visible delivery.
+- Retain portable paths, no staging default, safe media and apiRoot/grammy.
+- Add bounded synthetic regressions. No live E2E or restart recovery claim.
+
 ## v1.3.0 - 2026-10-15
 
 Sub-agents spawned from the owner's runs keep the owner's tool access.

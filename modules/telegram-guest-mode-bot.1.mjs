@@ -1,84 +1,69 @@
-// Module telegram-guest-mode-bot, part 1/2: guest_message registration in the Telegram ingress drain-factory.
-// OpenClaw 2026.9.7: the telegram-ingress-drain-factory chunk is merged into transport-status-*.mjs (same
-// createTelegramInboundHandlers). Upstream merged handleEditedChannelPost into handleEditedMessage(ctx, kind) — the
-// insertion anchor targets the new signature `handleEditedMessage = async (ctx, kind) =>` (the 9.6 one is kept as a
-// fallback). The guest_message handler semantics are unchanged: handleInboundMessageLike still takes isForum from the
-// event; messageThreadId is no longer read from the event in 9.7 (harmless, kept for parity).
-import { replaceOnce, contains } from "../lib/patch-helpers.mjs";
+// Portable OpenClaw 2026.10.9: telegram-guest-mode-bot.1.
+import { replaceOnce, contains, notContains } from "../lib/patch-helpers.mjs";
 export const label = "telegram-guest-mode-bot";
-export const target = { key: "bot", label: "Telegram ingress drain-factory bundle (inbound handlers)", needles: ["function registerTelegramInboundHandlers({ bot, pipeline })", "function createTelegramInboundPipeline({ params, message, authorization })", "const handleInboundMessageLike = async (event) => {"] };
-const EDIT_ANCHOR_97 = "\tconst handleEditedMessage = async (ctx, kind) => {";
-const EDIT_ANCHOR_96 = "\tconst handleEditedMessage = async (ctx) => {";
-export function patch(source) {
-  if (source.includes('bot.on("guest_message", pipeline.handle)')) return source;
-  let next = source;
-  const editAnchor = next.includes(EDIT_ANCHOR_97) ? EDIT_ANCHOR_97 : EDIT_ANCHOR_96;
-  next = replaceOnce(
-    next,
-    editAnchor,
-    `\tconst handleGuestMessage = async (ctx) => {
-\t\tconst msg = ctx.guestMessage ?? ctx.update?.guest_message;
-\t\tif (!msg) return { kind: "ignored" };
-\t\tconst guestQueryId = typeof msg.guest_query_id === "string" && msg.guest_query_id.trim() ? msg.guest_query_id.trim() : void 0;
+export const verdict = "rewrite";
+export const target = { key: "bot", label: "Telegram inbound pipeline bundle (bot-handlers.inbound-pipeline)", needles: ["function registerTelegramInboundHandlers({ bot, pipeline })", "function createTelegramInboundPipeline({ params: handlerParams, message: messageRuntime, authorization: authorizationRuntime })", "\tconst handleMessage = async (ctx, kind) => {\n\t\tconst isChannelPost = kind === \"channel_post\";"] };
+const MARK = "hotfix: telegram-guest-mode-bot";
+const HELPER_ANCHOR = "\tconst handleMessage = async (ctx, kind) => {\n\t\tconst isChannelPost = kind === \"channel_post\";\n\t\tconst msg = isChannelPost ? ctx.channelPost : ctx.message;\n\t\tif (!msg) return { kind: \"ignored\" };\n\t\tconst isGroup = isChannelPost || msg.chat.type === \"group\" || msg.chat.type === \"supergroup\";\n\t\tconst isForum = isChannelPost ? false : await resolveForumFlag(msg, isGroup);\n";
+const HELPER_NEW = `\t// ${MARK} (guest_message, 10.5): нормализация гостевого сообщения для общего handleMessage
+\tconst hotfixNormalizeTelegramGuestMessage = (ctx) => {
+\t\tconst guestMsg = ctx.guestMessage ?? ctx.update?.guest_message;
+\t\tif (!guestMsg) return;
+\t\tconst guestQueryId = typeof guestMsg.guest_query_id === "string" && guestMsg.guest_query_id.trim() ? guestMsg.guest_query_id.trim() : void 0;
 \t\tif (!guestQueryId) {
 \t\t\tlogVerbose("telegram guest_message skipped: missing guest_query_id");
-\t\t\treturn { kind: "ignored" };
+\t\t\treturn;
 \t\t}
-\t\tconst guestFrom = msg.from ?? msg.guest_bot_caller_user;
-\t\tconst normalizedMsg = withResolvedTelegramForumFlag({
-\t\t\t...msg,
-\t\t\t...(guestFrom ? { from: guestFrom } : {})
-\t\t}, false);
-\t\tconst botUserId = resolveBotUserId(ctx);
-\t\tif (normalizedMsg.from?.id != null && normalizedMsg.from.id === botUserId) return { kind: "ignored" };
-\t\treturn await handleInboundMessageLike({
-\t\t\tctxForDedupe: ctx,
-\t\t\tctx: buildSyntheticContext(ctx, normalizedMsg),
-\t\t\tbotUserId,
-\t\t\tmsg: normalizedMsg,
-\t\t\tchatId: normalizedMsg.chat.id,
-\t\t\tisGroup: false,
-\t\t\tisForum: false,
-\t\t\tmessageThreadId: void 0,
-\t\t\tsenderId: normalizedMsg.from?.id != null ? String(normalizedMsg.from.id) : "",
-\t\t\tsenderUsername: normalizedMsg.from?.username ?? "",
-\t\t\trequireConfiguredGroup: false,
-\t\t\tsendOversizeWarning: false,
-\t\t\toversizeLogMessage: "guest message media exceeds size limit",
-\t\t\terrorMessage: "guest_message handler failed"
-\t\t});
+\t\tconst guestFrom = guestMsg.from ?? guestMsg.guest_bot_caller_user;
+\t\treturn {
+\t\t\t...guestMsg,
+\t\t\t...guestFrom ? { from: guestFrom } : {}
+\t\t};
 \t};
-${editAnchor}`,
-    "Telegram guest_message handler (drain-factory)",
-  );
-  next = replaceOnce(
-    next,
-    "\treturn {\n\t\thandleMessage,\n\t\thandleEditedMessage,",
-    "\treturn {\n\t\thandleMessage,\n\t\thandleGuestMessage,\n\t\thandleEditedMessage,",
-    "Telegram inbound handlers export",
-  );
-  next = replaceOnce(
-    next,
-    "\t\tif (ctx.message) return await handlers.handleMessage(ctx);",
-    "\t\tif (ctx.message) return await handlers.handleMessage(ctx);\n\t\tif (ctx.guestMessage ?? ctx.update?.guest_message) return await handlers.handleGuestMessage(ctx);",
-    "Telegram inbound pipeline guest branch",
-  );
-  next = replaceOnce(
-    next,
-    '\tbot.on("message", pipeline.handle);',
-    '\tbot.on("message", pipeline.handle);\n\tbot.on("guest_message", pipeline.handle);',
-    "Telegram guest_message registration",
-  );
+\tconst handleMessage = async (ctx, kind) => {
+\t\tconst isChannelPost = kind === "channel_post";
+\t\tconst isGuestMessage = kind === "guest_message"; // ${MARK}
+\t\tconst msg = isChannelPost ? ctx.channelPost : isGuestMessage ? hotfixNormalizeTelegramGuestMessage(ctx) : ctx.message;
+\t\tif (!msg) return { kind: "ignored" };
+\t\tconst isGroup = !isGuestMessage && (isChannelPost || msg.chat.type === "group" || msg.chat.type === "supergroup");
+\t\tconst isForum = isChannelPost || isGuestMessage ? false : await resolveForumFlag(msg, isGroup);
+`;
+const OVERSIZE_OLD = "\t\t\t\tsendOversizeWarning: !isChannelPost,\n\t\t\t\toversizeLogMessage: isChannelPost ? \"channel post media exceeds size limit\" : \"media exceeds size limit\",\n";
+const OVERSIZE_NEW = "\t\t\t\tsendOversizeWarning: !isChannelPost && !isGuestMessage,\n\t\t\t\toversizeLogMessage: isChannelPost ? \"channel post media exceeds size limit\" : isGuestMessage ? \"guest message media exceeds size limit\" : \"media exceeds size limit\",\n";
+const ERROR_OLD = "\t\t\tconst errorMessage = isChannelPost ? \"channel_post handler failed\" : \"handler failed\";\n";
+const ERROR_NEW = "\t\t\tconst errorMessage = isChannelPost ? \"channel_post handler failed\" : isGuestMessage ? \"guest_message handler failed\" : \"handler failed\";\n";
+const DISPATCH_OLD = "\t\tif (ctx.message) return await handleMessage(ctx, \"message\");\n";
+const DISPATCH_NEW = "\t\tif (ctx.message) return await handleMessage(ctx, \"message\");\n\t\tif (ctx.guestMessage ?? ctx.update?.guest_message) return await handleMessage(ctx, \"guest_message\"); // " + MARK + "\n";
+const REGISTER_OLD = "\tbot.on([\n\t\t\"message\",\n\t\t\"edited_message\",\n\t\t\"channel_post\",\n\t\t\"edited_channel_post\"\n\t], pipeline.handle);";
+const REGISTER_NEW = "\tbot.on([\n\t\t\"message\",\n\t\t\"edited_message\",\n\t\t\"channel_post\",\n\t\t\"edited_channel_post\",\n\t\t\"guest_message\"\n\t], pipeline.handle);";
+export function patch(source) {
+  if (source.includes(HELPER_NEW) && source.includes(DISPATCH_NEW) && source.includes(REGISTER_NEW) && source.includes(OVERSIZE_NEW) && source.includes(ERROR_NEW)) return source;
+  let next = source;
+  if (!next.includes(HELPER_NEW)) next = replaceOnce(next, HELPER_ANCHOR, HELPER_NEW, "Telegram guest_message kind in handleMessage(ctx, kind)");
+  if (!next.includes(OVERSIZE_NEW)) next = replaceOnce(next, OVERSIZE_OLD, OVERSIZE_NEW, "Telegram guest oversize warning off");
+  if (!next.includes(ERROR_NEW)) next = replaceOnce(next, ERROR_OLD, ERROR_NEW, "Telegram guest_message handler error label");
+  if (!next.includes(DISPATCH_NEW)) next = replaceOnce(next, DISPATCH_OLD, DISPATCH_NEW, "Telegram inbound pipeline guest branch");
+  if (!next.includes(REGISTER_NEW)) next = replaceOnce(next, REGISTER_OLD, REGISTER_NEW, "Telegram guest_message registration");
   return next;
 }
-export const check = { assertions: [
-  contains('bot.on("guest_message"', "guest_message handler"),
-  contains("handlers.handleGuestMessage(ctx)", "guest pipeline branch"),
-  contains('errorMessage: "guest_message handler failed"', "guest inbound event"),
-  // drift 9.7: pipeline.handle must route the guest branch right after message; the handler sits next to handleEditedMessage.
-  contains("\t\tif (ctx.message) return await handlers.handleMessage(ctx);\n\t\tif (ctx.guestMessage ?? ctx.update?.guest_message) return await handlers.handleGuestMessage(ctx);", "guest branch right after message branch"),
-  contains("\treturn {\n\t\thandleMessage,\n\t\thandleGuestMessage,", "guest handler exported from createTelegramInboundHandlers"),
-  // handleInboundMessageLike must still accept the event shape the guest handler passes
-  contains("const handleInboundMessageLike = async (event) => {", "handleInboundMessageLike(event) contract"),
-  contains("\t\t\t\tisForum: event.isForum,\n\t\t\t\tsenderId: event.senderId,", "authorizeInboundMessage still reads event.isForum/senderId"),
+// Дрейф 10.5: guest-ветка обязана жить внутри handleMessage (тело authorize→processInboundMessage общее) и диспетчиться сразу после message.
+const guestInsideHandleMessage = (src) => {
+  const start = src.indexOf("\tconst handleMessage = async (ctx, kind) => {");
+  const edited = src.indexOf("\tconst handleEditedMessage = async (ctx, kind) => {", start);
+  if (start < 0 || edited < 0) return "handleMessage/handleEditedMessage not found";
+  const body = src.slice(start, edited);
+  for (const needle of ["const isGuestMessage = kind === \"guest_message\";", "await authorizeInboundMessage({", "return await processInboundMessage({", "sendOversizeWarning: !isChannelPost && !isGuestMessage,", "isGuestMessage ? \"guest_message handler failed\""]) if (!body.includes(needle)) return `handleMessage body lost ${needle}`;
+  return null;
+};
+export const check = { gate: "required", assertions: [
+  contains(HELPER_NEW, "guest_message kind + normalizer in handleMessage"),
+  contains(DISPATCH_NEW, "guest branch right after message branch in pipeline.handle"),
+  contains(REGISTER_NEW, "guest_message in bot.on([...]) registration"),
+  contains(OVERSIZE_NEW, "guest oversize warning suppressed"),
+  contains(ERROR_NEW, "guest inbound error label"),
+  notContains("\tconst isForum = isChannelPost ? false : await resolveForumFlag(msg, isGroup);\n", "unpatched forum resolution (guest chat getChat)"),
+  contains("\t\tconst senderId = isChannelPost && msg.sender_chat?.id != null ? String(msg.sender_chat.id) : msg.from?.id != null ? String(msg.from.id) : \"\";", "senderId still from msg.from (guest caller via normalizer)"),
+  contains("\t\t\t\trequireConfiguredGroup: isChannelPost,\n\t\t\t\tdmAccess: \"challenge\"", "authorizeInboundMessage contract (requireConfiguredGroup/dmAccess) unchanged"),
+  guestInsideHandleMessage,
+  (src) => (src.split("handleMessage(ctx, \"guest_message\")").length - 1) === 1 ? null : "guest dispatch must appear exactly once",
 ] };

@@ -3,7 +3,7 @@
 //
 // Adds Telegram Bot API guest-query support (supports_guest_queries / guest_message / answerGuestQuery)
 // to an installed OpenClaw package by patching built dist bundles in place. Tested baseline: OpenClaw
-// 2026.9.7. Review README.md and HOTFIX_NOTES.md before running this on a production host.
+// 2026.10.9. Review README.md and HOTFIX_NOTES.md before running this on a production host.
 //
 //   node apply-guest-mode.mjs [--dry-run|--check] [--package-root <dir>] [--backup-dir <dir>] [--with-ultrafast] [--allow-untested] [--json]
 //   env: OPENCLAW_PACKAGE_ROOT, OPENCLAW_HOTFIX_BACKUP_DIR, OPENCLAW_GUEST_MODE_ULTRAFAST=1, OPENCLAW_GUEST_MODE_ALLOW_UNTESTED=1

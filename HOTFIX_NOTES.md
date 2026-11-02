@@ -1,3 +1,24 @@
+# Current port: 1.4.0 / OpenClaw 2026.10.9
+
+The current kit is pinned to 2026.10.9. Earlier builds discussed below are
+historical. Content locators/assertions follow the new ingress, reply-deliverer,
+follow-up, command-delivery and spawn layouts. Upstream allowed updates,
+owner-context forwarding and Ultrafast value normalization need no old patches.
+
+Original query ownership follows admission, actual runs, spawn, announce and
+settle. Collection/overflow/dedupe preserve ownership. Public grammy/apiRoot,
+portable rules paths and no-default-staging behavior remain. R2 adds captured
+media roots, serialized attachment-preserving edits and per-payload receipts.
+Timeouts are unknown, not success; only a definitive 400 media-format rejection
+permits document fallback.
+
+Verification: syntax, disposable pristine-package apply/check, repeat apply and
+dry-run, and bounded network-free regressions. No live Telegram E2E or restart
+recovery is claimed. Bindings/receipts remain process-local; missing ownership
+and pre-frozen mixed-query cohorts fail closed. No new authority or persistence.
+
+## Historical notes (earlier kit versions)
+
 # Hotfix notes
 
 Tested baseline: OpenClaw `2026.9.7` (grammy 1.46.0, Bot API 10.3 types).

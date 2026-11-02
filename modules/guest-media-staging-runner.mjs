@@ -82,13 +82,13 @@ async function hotfixGuestMediaStagingDirect(ctx, staging) {
 \t\t\tcontinue;
 \t\t}
 \t\ttry {
-\t\t\tconst result = await registry.stageAndAttachMedia(staging.sessionKey, { path: local.real, fileName: staging.locals.length === 1 ? staging.fileName : void 0, mimeType: staging.locals.length === 1 ? staging.mimeType : void 0, caption: staging.caption, stagingChatId: staging.stagingTo, forceDocument: staging.forceDocument });
+\t\t\tconst result = await registry.stageAndAttachMedia(staging.sessionKey, { path: local.real, guestQueryId: staging.guestQueryId, runId: staging.runId, fileName: staging.locals.length === 1 ? staging.fileName : void 0, mimeType: staging.locals.length === 1 ? staging.mimeType : void 0, caption: staging.caption, stagingChatId: staging.stagingTo, forceDocument: staging.forceDocument });
 \t\t\titems.push({ fileName: result?.fileName ?? fileName, delivered: result?.delivered === true, mode: result?.mode, kind: result?.kind, size: result?.size, uploadMethod: result?.uploadMethod, stagingMessageId: result?.stagingMessageId, ...(result?.delivered ? {} : { reason: result?.reason ?? "unknown" }) });
 \t\t} catch (err) {
 \t\t\titems.push({ fileName, delivered: false, reason: formatErrorMessage(err) });
 \t\t}
 \t}
-\tconst delivered = items.some((item) => item.delivered);
+\tconst delivered = items.length > 0 && items.every((item) => item.delivered === true);
 \tconst failed = items.filter((item) => !item.delivered).map((item) => \`\${item.fileName}: \${item.reason}\`);
 \tconst note = delivered
 \t\t? \`Guest delivery: \${items.filter((i) => i.delivered).length} attachment(s) inserted into the guest's inline message (a copy stays in the operator's staging chat).\${failed.length ? \` Not attached: \${failed.join("; ")}.\` : ""} Do not resend; mention the attachment briefly in your final text.\`
@@ -192,7 +192,7 @@ async function hotfixGuestMediaStagingAfterSend(ctx, staging, payload) {
 \t} catch (err) {
 \t\treason = formatErrorMessage(err);
 \t}
-\tconst delivered = items.some((item) => item.delivered);
+\tconst delivered = items.length > 0 && items.every((item) => item.delivered === true);
 \tconst failed = items.filter((item) => !item.delivered).map((item) => item.reason).filter(Boolean);
 \tconst note = delivered
 \t\t? \`Guest delivery: \${items.filter((i) => i.delivered).length} attachment(s) inserted into the guest's inline message; a copy was sent to the operator's staging chat.\${failed.length ? \` Not attached: \${failed.join("; ")}.\` : ""} Do not resend; mention the attachment briefly in your final text.\`
@@ -227,7 +227,7 @@ const TO_V3 = `\tlet to = readToolStringParam(params, "to", { required: true });
 \t//#endregion
 \tlet sendPayload = await buildMessagePayload({
 `;
-const TO_NEW = `\tlet to = readToolStringParam(params, "to", { required: true });
+const TO_PREVIOUS = `\tlet to = readToolStringParam(params, "to", { required: true });
 \t//#region ${MARK} (runner): guest media → staging chat
 \tconst guestMediaStaging = hotfixResolveGuestMediaStaging(ctx, to);
 \tif (guestMediaStaging?.mode === "direct") return await annotateSourceDelivery({ kind: "send", channel, action, to: guestMediaStaging.stagingTo, handledBy: "plugin", payload: await hotfixGuestMediaStagingDirect(ctx, guestMediaStaging), dryRun }, ctx, false);
@@ -238,6 +238,7 @@ const TO_NEW = `\tlet to = readToolStringParam(params, "to", { required: true })
 \t//#endregion
 \tlet sendPayload = await buildMessagePayload({
 `;
+const TO_NEW = TO_PREVIOUS.replace("\tconst guestMediaStaging = hotfixResolveGuestMediaStaging(ctx, to);","\tconst guestMediaStaging = hotfixResolveGuestMediaStaging(ctx, to);\n\t// hotfix: guest-query-ownership-message — no ordinary send for a guest-origin message.\n\tif (input.sessionKey?.includes(\":guest:\")) {\n\t\tconst owner = globalThis.__openclawHotfixGuestAck?.resolveOwner?.(input.sessionKey, { runId: input.runId });\n\t\tif (!owner || guestMediaStaging?.mode !== \"direct\") throw new Error(\"guest_inline_unavailable: exact query/local-media route required\");\n\t\tguestMediaStaging.guestQueryId = owner.guestQueryId;\n\t\tguestMediaStaging.runId = input.runId;\n\t}");
 const RET_GW_OLD = "\t\treturn await annotateSourceDelivery(withSendNormalization(gatewayPluginAction, sendPayload.normalization), ctx, reply?.source === \"explicit\");\n";
 const RET_GW_NEW = `\t\treturn await annotateSourceDelivery(withSendNormalization(guestMediaStaging ? { ...gatewayPluginAction, payload: await hotfixGuestMediaStagingAfterSend(ctx, guestMediaStaging, gatewayPluginAction.payload) } : gatewayPluginAction, sendPayload.normalization), ctx, reply?.source === "explicit"); // ${MARK}\n`;
 const RET_CORE_OLD = "\t\thandledBy: send.handledBy,\n\t\tpayload: send.payload,\n\t\t...send.deliveredText ? { deliveredText: send.deliveredText } : {},\n";
@@ -248,6 +249,7 @@ export function patch(source) {
   let next = source;
   if (!next.includes(FS_IMPORT)) next = next.includes("import fs from \"node:fs\";") ? next : `${FS_IMPORT}${next}`;
   if (!next.includes(HELPERS)) next = replaceRegion(next, { start: REGION_START, body: HELPERS, anchor: "const UNRESOLVED_PREFIX_VAR_PATTERN", label: "guest-media-staging runner helpers before executeMessageSend" });
+  if (next.includes(TO_PREVIOUS)) next = replaceOnce(next, TO_PREVIOUS, TO_NEW, "query ownership");
   if (!next.includes(TO_NEW)) {
     const old = [TO_V3, TO_V2].find((candidate) => next.includes(candidate));
     next = old ? replaceOnce(next, old, TO_NEW, "executeMessageSend target rewrite upgrade (earlier revision → v4)") : replaceOnce(next, TO_OLD, TO_NEW, "executeMessageSend target rewrite (guest media → staging)");
@@ -273,7 +275,7 @@ export const check = { assertions: [
   contains("if (guestMediaStaging?.mode === \"direct\") return await annotateSourceDelivery({ kind: \"send\", channel, action, to: guestMediaStaging.stagingTo, handledBy: \"plugin\", payload: await hotfixGuestMediaStagingDirect(ctx, guestMediaStaging), dryRun }, ctx, false);", "direct mode: upload without the pipeline"),
   contains("real = fs.realpathSync(file);", "local media resolved with realpath before the allowlist check"),
   contains("if (!roots.some((root) => isPathInside(root, real))) return { file, real, denied:", "allowlist of local roots checked on the realpath (fail-closed)"),
-  contains("stageAndAttachMedia(staging.sessionKey, { path: local.real,", "the realpath is what gets uploaded"),
+  contains("stageAndAttachMedia(staging.sessionKey, { path: local.real, guestQueryId: staging.guestQueryId, runId: staging.runId,", "the realpath is what gets uploaded"),
   notContains("items=${JSON.stringify(items)}", "full item dump (paths/file_id) in the log"),
   notContains("stagingTo: staging.stagingTo, originalTo: staging.originalTo, items", "staging chat id exposed in guestMediaDelivery"),
   contains("import { r as isPathInside } from \"./path-guards-", "isPathInside imported"),
@@ -281,8 +283,8 @@ export const check = { assertions: [
   (c) => count(c, "import fs from \"node:fs\"") === 1 ? null : `expected exactly one import fs, found ${count(c, "import fs from \"node:fs\"")}`,
   contains("import { t as readBooleanParam } from \"./boolean-param-", "readBooleanParam imported"),
   // chunk dependencies
-  contains("h as readToolStringParam", "readToolStringParam imported"),
-  contains("o as collectActionMediaSourceHints", "collectActionMediaSourceHints imported"),
+  (c) => /\bas readToolStringParam\b/.test(c) ? null : "readToolStringParam imported",
+  (c) => /\bas collectActionMediaSourceHints\b/.test(c) ? null : "collectActionMediaSourceHints imported",
   contains("const log = createSubsystemLogger(\"outbound/message-action\");", "outbound/message-action logger in the chunk"),
   contains("import { t as formatErrorMessage } from \"./errors-", "formatErrorMessage in the chunk"),
   // the intercept must precede buildMessagePayload and executeGatewayAction inside executeMessageSend

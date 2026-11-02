@@ -1,3 +1,4 @@
+import { patchMedia } from "./guest-query-ownership-shared.mjs";
 // Module guest-media-staging-delivery (delivery.replies bundle). Cascade AFTER guest-ack-edit-delivery (last in the
 // delivery entry): adds its own region right after the guest-ack registry region (before deliverTextReply) and never
 // touches the registry region (that module rewrites only the code between its own markers).
@@ -31,7 +32,7 @@ export const label = "guest-media-staging-delivery";
 export const target = ackTarget;
 const MARK = "hotfix: guest-media-staging";
 const REGION_START = `//#region ${MARK} (registry extension)`;
-const REGION = [
+const REGION = patchMedia([
   `${REGION_START} v4: guest media — file_id from the staging chat → media blocks in the guest inline message; media.* rules from the guest-ack rules file; uploads through the bot client (apiRoot-aware)`,
   "const HOTFIX_GUEST_MEDIA_DEFAULTS = Object.freeze({ enabled: true, stagingChatId: \"\", maxBlocks: 10 }); // no default staging chat — set mediaStagingChatId in the rules file (guest media stays disabled until then)",
   "const HOTFIX_GUEST_MEDIA_CAPTION_LIMIT = 1024;",
@@ -339,8 +340,8 @@ const REGION = [
   "};",
   "//#endregion",
   "",
-].join("\n");
-const ANCHOR = "async function deliverTextReply(params) {";
+].join("\n"));
+const ANCHOR = "function createReplyDeliverer(config, sender, progress) {";
 export function patch(source) {
   const next = ackPatch(source);
   if (next.includes(REGION)) return next;
@@ -383,7 +384,7 @@ export const check = { assertions: [
   contains("function truncateTelegramGuestText(text) {", "truncateTelegramGuestText (telegram-guest-mode-delivery)"),
   contains("function hotfixTelegramApiRoot(bot) {", "hotfixTelegramApiRoot (telegram-guest-mode-delivery)"),
   contains("const TELEGRAM_GUEST_TEXT_LIMIT = 4096;", "TELEGRAM_GUEST_TEXT_LIMIT"),
-  contains("T as planTelegramTextDeliveryPages", "planTelegramTextDeliveryPages imported by the chunk from send-*"),
+  (c) => /\bas planTelegramTextDeliveryPages\b/.test(c) ? null : "planTelegramTextDeliveryPages imported",
   (c) => count(c, "import fs from \"node:fs\"") === 1 ? null : "exactly one import fs expected (added by guest-ack-edit-delivery)",
   // the wrapped function must stay a function declaration (a const/let binding cannot be reassigned) declared exactly once
   (c) => count(c, "function hotfixGuestAckEditInline(") === 1 ? null : "hotfixGuestAckEditInline declared more than once",

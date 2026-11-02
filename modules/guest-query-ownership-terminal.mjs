@@ -1,0 +1,6 @@
+// Portable OpenClaw 2026.10.9: guest-query-ownership-terminal.
+import {replaceOnce,contains} from "../lib/patch-helpers.mjs";
+export const label="guest-query-ownership-terminal";export const verdict="new";export const target={"key":"subagent-completion-silent-fallback","label":"guest-query-ownership-terminal","needles":["function createDirectAnnounceResponseClassifier(context) {"]};
+const changes=[["\t\tif (parentOnly) return resolvePrivateCompletionDeliveryResult","\t\t// hotfix: guest-query-ownership-terminal — private guest still owns visible inline delivery.\n\t\tif (params.requesterSessionKey?.includes(\":guest:\") && directAnnounceResult) {\n\t\t\tconst failure = getAgentCommandDeliveryFailure(directAnnounceResult);\n\t\t\tif (failure) return { delivered: false, path: \"direct\", error: failure, ...(getAutomaticDeliveryEvidence(directAnnounceResult).mayHaveSent ? { disposition: \"ambiguous\" } : {}) };\n\t\t}\n\t\tif (parentOnly) return resolvePrivateCompletionDeliveryResult"]];
+export function patch(s){for(const [a,b] of changes)if(!s.includes(b))s=replaceOnce(s,a,b,label);return s;}
+export const check={gate:"required",assertions:changes.map(([,b])=>contains(b,label))};

@@ -1,12 +1,8 @@
-// Module guest-plain-delivery-normalize: cascade over telegram-guest-mode-delivery. Guest replies are
-// delivered as plain text (no parse_mode): HTML is converted to plain text by a local helper (importing
-// telegramHtmlToPlainTextFallback from text-chunk-limit-* would bind the kit to a hashed chunk name and a
-// minified export letter), and a leading status header line of the form "Модель: …" (the model banner some
-// workspaces prepend) is stripped — kept byte-for-byte from v1.1.x for behavioural parity. The rich path of
-// guest-ack-edit-delivery takes chunk.richMessage separately; this module keeps the plain fallback clean.
+// Portable OpenClaw 2026.10.9: guest-plain-delivery-normalize.
 import { replaceOnce, insertBefore, contains } from "../lib/patch-helpers.mjs";
 import { patch as basePatch, target as baseTarget } from "./telegram-guest-mode-delivery.mjs";
 export const label = "guest-plain-delivery-normalize";
+export const verdict = "rewrite";
 export const target = baseTarget;
 export function patch(source) {
   let next = basePatch(source);
@@ -28,17 +24,17 @@ function normalizeTelegramGuestPlainText(text) {
   );
   next = replaceOnce(
     next,
-    "\t\tconst guestChunks = filterEmptyTelegramTextChunks(params.chunkText(params.text));",
-    "\t\tconst guestReplyText = normalizeTelegramGuestPlainText(params.text);\n\t\tconst guestChunks = filterEmptyTelegramTextChunks(params.chunkText(guestReplyText));",
+    "\t\t\tconst guestChunks = hotfixGuestPlanTextChunks(config, params.text);",
+    "\t\t\tconst guestReplyText = normalizeTelegramGuestPlainText(params.text);\n\t\t\tconst guestChunks = hotfixGuestPlanTextChunks(config, guestReplyText);",
     "guest-plain chunks",
   );
   next = replaceOnce(
     next,
-    "\t\tconst useHtml = Boolean(firstChunk?.htmlText?.trim()) && !firstChunk?.richMessage?.blocks?.length;\n\t\tconst fallbackText = (useHtml ? firstChunk?.htmlText : firstChunk?.plainText) ?? params.text;",
-    "\t\tconst useHtml = false;\n\t\tconst fallbackText = normalizeTelegramGuestPlainText(firstChunk?.plainText ?? guestReplyText);",
+    "\t\t\tconst useHtml = Boolean(firstChunk?.htmlText?.trim()) && !firstChunk?.richMessage?.blocks?.length;\n\t\t\tconst fallbackText = (useHtml ? firstChunk?.htmlText : firstChunk?.plainText) ?? params.text;",
+    "\t\t\tconst useHtml = false;\n\t\t\tconst fallbackText = normalizeTelegramGuestPlainText(firstChunk?.plainText ?? guestReplyText);",
     "guest-plain fallbackText",
   );
-  next = replaceOnce(next, "\t\t\t\tparseMode: useHtml ? \"HTML\" : void 0,", "\t\t\t\tparseMode: void 0,", "guest-plain parseMode");
+  next = replaceOnce(next, "\t\t\t\t\tparseMode: useHtml ? \"HTML\" : void 0,", "\t\t\t\t\tparseMode: void 0,", "guest-plain parseMode");
   return next;
 }
-export const check = { assertions: [ contains("function normalizeTelegramGuestPlainText(text)", "guest plain normalize helper"), contains("TELEGRAM_GUEST_MODEL_HEADER_RE", "guest model-header strip regex"), contains("parseMode: void 0,", "guest parseMode plain") ] };
+export const check = { gate: "review", assertions: [ contains("function normalizeTelegramGuestPlainText(text)", "guest plain normalize helper"), contains("TELEGRAM_GUEST_MODEL_HEADER_RE", "guest model-header strip regex"), contains("parseMode: void 0,", "guest parseMode plain"), contains("const guestReplyText = normalizeTelegramGuestPlainText(params.text);", "guest reply text normalized before planning"), (src) => src.includes("parseMode: useHtml ? \"HTML\" : void 0,") ? "guest HTML parse mode remnant" : null ] };

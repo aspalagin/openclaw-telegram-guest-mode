@@ -1,19 +1,8 @@
-// Module guest-no-chat-fallback: port into delivery.replies. A guest session (sessionKey with ":guest:")
-// without a guestQueryId must never fall through to a regular chat send (the reply would land in the chat
-// the query was typed in, or in the operator's chat); the payload is dropped with a diagnostic.
-// OpenClaw 2026.9.6 split deliverReplies into thin wrappers deliverReplies / deliverStructuredReplies over a
-// shared deliverReplyPlan(params, createPlan). The main final path of bot-message (sendPayload) goes through
-// deliverStructuredReplies, deliverReplies serves deliverFallback and native commands, so the guard sits at
-// the head of deliverReplyPlan (covers both entries; createPlan is called later, so the early return does no
-// work). params.sessionKeyForInternalHooks and params.guestQueryId still come from createDeliveryBaseOptions.
-// 2026.9.7: unchanged. settleFailedFinalDelivery sends its warning through deliverFallback → deliverReplies →
-// deliverReplyPlan, i.e. under the same guard; a {delivered:false} result is treated by bot-message as the
-// "no_visible_result" suppression, whose follow-up warnings go through deliverReplyPlan again and are dropped
-// the same way (there is no sendMessage path). Drift guard: a new chunk export named deliver*/send* (other
-// than the two wrappers) would be a new delivery entry that bypasses the guard.
+// Portable OpenClaw 2026.10.9: guest-no-chat-fallback.
 import { replaceOnce, contains } from "../lib/patch-helpers.mjs";
 export const label = "guest-no-chat-fallback";
-export const target = { key: "delivery", label: "Telegram delivery.replies bundle", needles: ["async function deliverTextReply(params) {", "async function deliverReplies(params) {", "async function deliverReplyPlan(params, createPlan) {", "function filterEmptyTelegramTextChunks(chunks) {"] };
+export const verdict = "port";
+export const target = { key: "delivery", label: "Telegram delivery.replies bundle", needles: ["function createReplyDeliverer(config, sender, progress) {", "async function deliverReplies(params) {", "async function deliverReplyPlan(params, createPlan) {"] };
 export function patch(source) {
   if (source.includes("hotfix: guest-no-chat-fallback")) return source;
   return replaceOnce(
@@ -32,8 +21,8 @@ export function patch(source) {
     "guest-no-chat-fallback delivery guard",
   );
 }
-// Placement guards: the guard must sit inside deliverReplyPlan (shared path of deliverReplies and
-// deliverStructuredReplies) and both wrappers must delegate to deliverReplyPlan (otherwise one entry bypasses it).
+// Сторож на место: guard обязан стоять внутри deliverReplyPlan (общий путь deliverReplies + deliverStructuredReplies),
+// а обе обёртки — делегировать в deliverReplyPlan (иначе один из входов обходит guard).
 const guardInReplyPlan = (src) => {
   const start = src.indexOf("async function deliverReplyPlan(params, createPlan) {");
   if (start < 0) return "deliverReplyPlan not found";
@@ -54,4 +43,4 @@ const noNewDeliveryExports = (src) => {
   const extra = names.filter((name) => /^(deliver|send)/i.test(name) && name !== "deliverReplies" && name !== "deliverStructuredReplies");
   return extra.length ? `new delivery export(s) may bypass guest guard: ${extra.join(", ")}` : null;
 };
-export const check = { assertions: [ contains("hotfix: guest-no-chat-fallback", "guard marker"), contains("[hotfix][guest-no-chat-fallback]", "diagnostic log tag"), contains('if (!params.guestQueryId && typeof params.sessionKeyForInternalHooks === "string" && params.sessionKeyForInternalHooks.includes(":guest:")) {', "guard condition"), guardInReplyPlan, wrappersDelegate, noNewDeliveryExports ] };
+export const check = { gate: "required", assertions: [ contains("hotfix: guest-no-chat-fallback", "guard marker"), contains("[hotfix][guest-no-chat-fallback]", "diagnostic log tag"), contains('if (!params.guestQueryId && typeof params.sessionKeyForInternalHooks === "string" && params.sessionKeyForInternalHooks.includes(":guest:")) {', "guard condition"), guardInReplyPlan, wrappersDelegate, noNewDeliveryExports ] };

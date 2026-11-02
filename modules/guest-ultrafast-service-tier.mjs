@@ -129,8 +129,8 @@ const HELPER = [
   "",
 ].join("\n");
 const ANCHOR = "async function prepareEmbeddedAttemptTransport(input) {";
-const BEFORE = "\tconst streamExtraParamsOverride = {\n\t\t...attempt.streamParams,\n\t\tfastMode: attempt.fastMode\n\t};\n";
-const AFTER = `\tconst streamExtraParamsOverride = {\n\t\t...attempt.streamParams,\n\t\tfastMode: attempt.fastMode,\n\t\t...resolveGuestUltrafastServiceTierOverride(attempt, input.sessionAgentId) /* ${MARK} */\n\t};\n`;
+const BEFORE = "\tconst streamExtraParamsOverride = {\n\t\t...attempt.streamParams,\n\t\tfastMode: attempt.fastMode,\n\t\t...attempt.trigger === \"memory\" ? {\n";
+const AFTER = `\tconst streamExtraParamsOverride = {\n\t\t...attempt.streamParams,\n\t\tfastMode: attempt.fastMode,\n\t\t...resolveGuestUltrafastServiceTierOverride(attempt, input.sessionAgentId) /* ${MARK} */,\n\t\t...attempt.trigger === "memory" ? {\n`;
 export function patch(source) {
   if (source.includes(HELPER) && source.includes(AFTER)) return source;
   let out = source;
@@ -154,7 +154,7 @@ export const check = { assertions: [
   contains("import fs from \"node:fs\";", "import fs in the chunk"),
   contains("as log$6 } from \"./logger-", "import log$6 in the chunk"),
   // drift: the override must still reach both resolve paths (runtimePlan.transport.resolveExtraParams and resolvePreparedExtraParams)
-  (c) => count(c, "extraParamsOverride: streamExtraParamsOverride") === 2 ? null : `expected streamExtraParamsOverride passed as extraParamsOverride 2 times, found ${count(c, "extraParamsOverride: streamExtraParamsOverride")}`,
+  (c) => count(c, "extraParamsOverride: streamExtraParamsOverride") === 1 && c.includes("runtimePlan?.transport.resolveExtraParams(extraParamsContext)") && c.includes("...extraParamsContext,") ? null : `expected shared extraParamsContext passed to both resolvers; override occurrences, found ${count(c, "extraParamsOverride: streamExtraParamsOverride")}`,
   // drift: exactly one helper region; helper declared/called once
   (c) => count(c, REGION_START) === 1 && count(c, HELPER_MARK) === 1 && count(c, RULES_FN_MARK) === 1 && count(c, MATCH_FN_MARK) === 1 && count(c, "resolveGuestUltrafastServiceTierOverride(attempt, input.sessionAgentId)") === 1 ? null : "guest-ultrafast helper declared/called more than once",
 ] };

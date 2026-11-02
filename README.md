@@ -2,7 +2,7 @@
 
 Portable patch layer that adds Telegram Bot API guest-query support
 (`supports_guest_queries` / `guest_message` / `answerGuestQuery`, Bot API 10.3)
-to OpenClaw. Version 1.3.0 targets OpenClaw `2026.9.7`.
+to OpenClaw. Version 1.4.0 targets OpenClaw `2026.10.9`.
 
 This repository is an operator patch, not an upstream OpenClaw release. It
 patches built `dist/*.mjs` bundles in an installed OpenClaw package, so review
@@ -35,13 +35,13 @@ it before running it on a production host.
   or kept internal. Appended text is re-rendered as one rich document; the
   4096-character limit is enforced by trimming whole Markdown blocks, newest
   text first.
-- **Sub-agents of the owner keep the owner's tools.** In vanilla 2026.9.7
+- **Sub-agents of the owner keep the owner's tools.** In OpenClaw 2026.10.9
   every child run started by `sessions_spawn` is launched with least-privilege
   gateway scopes, so the gateway treats it as a non-owner and denies it the
   owner-only core tools (`nodes`, `computer`, `mobile_ui`, `sessions`,
   `terminal`, `portal`, `conversations_*`, `openclaw`, `screen`) — a sub-agent
   spawned from the owner's guest turn could not, for example, reach a paired
-  node. The kit forwards the parent run's `senderIsOwner` into the spawn tool
+  node. Upstream forwards the parent run's `senderIsOwner` into the spawn context; the kit uses it
   and launches the child with `operator.admin` **only** when the parent run is
   the owner's; guests who are not the owner, group chats and other senders get
   the previous least-privilege launch. This part is not guest-specific: it
@@ -66,7 +66,26 @@ it before running it on a production host.
   default on the `openai` provider, with an explicit `params.serviceTier`
   always taking precedence.
 
-## Status
+## Version 1.4.0: query-owned delivery
+
+This port targets **OpenClaw 2026.10.9 only**. Older kit versions remain in Git
+history; this version does not claim compatibility with 2026.9.7.
+
+- Original query ownership follows queued runs, children, announce and settle.
+  A newer guest query cannot receive an older child's text or file.
+- Queue collection, overflow and message-id dedupe keep queries separate.
+- Authorized local files use captured media roots and the safe media loader.
+  Native receipts preserve partial delivery, failed attempts and unknown outcomes.
+- Public state-dir resolution, empty staging default, realpath checks and the
+  configured apiRoot/grammy upload transport are retained.
+
+Validation is offline: disposable-package apply/check, idempotency, syntax and
+synthetic regressions. Live Telegram acceptance remains an operator step.
+Bindings and receipts are process-local; restart recovery is not supplied.
+Unknown ownership and legacy frozen mixed-query cohorts fail closed. Guest
+progress is suppressed; no ordinary chat/DM fallback is allowed.
+
+## Historical status
 
 The author's private patch layer, from which this kit is extracted, has been
 in production since 2026-06-13 on two bots; the kit itself exists since v1.0.0
@@ -139,18 +158,14 @@ OPENCLAW_PACKAGE_ROOT=/usr/lib/node_modules/openclaw node check-guest-mode.mjs
 sudo systemctl restart openclaw-gateway
 ```
 
-Re-running apply reports `status=unchanged changed=0`; an install patched by
-an earlier kit version (v1.1.x, v1.2.x) is upgraded in place (from v1.2.1 only
-the two new `sessions_spawn` entries are written). Two modules are
-conditional and report `n/a` when they do not apply to your build:
-`telegram-guest-allowed-update` (applied only when `DEFAULT_UPDATE_TYPES` of
-the installed grammy lacks `guest_message`; grammy 1.46 pinned by 2026.9.7
-already lists it) and `guest-announce-fallback-skip` (only relevant when a
-separate "silent completion fallback" hotfix is installed).
+Re-running apply reports unchanged with zero writes. This port targets a pristine
+2026.10.9 package, not an in-place upgrade of an earlier OpenClaw build.
+The optional silent-completion fallback guard reports not applicable on pristine
+builds. Guest allowed updates and owner-context forwarding are now upstream.
 
 > **This patches the installed dist.** Any OpenClaw update reverts the patched
 > bundles: re-run apply and check after every update. The anchors are pinned
-> to OpenClaw `2026.9.7` (`TESTED_OPENCLAW_VERSIONS` in `lib/kit.mjs`). On any
+> to OpenClaw `2026.10.9` (`TESTED_OPENCLAW_VERSIONS` in `lib/kit.mjs`). On any
 > other version the apply **refuses to run** (`status=refused`, nothing
 > written) unless `--allow-untested` is given; with the flag, unmatched anchors
 > still fail the whole run before anything is written, but matching anchors on
@@ -211,13 +226,12 @@ receive files. A copy of every file sent to a guest stays in that chat.
   kit: `fs.realpathSync` first, then the canonical path must lie inside one of
   the local media roots the message tool already enforces
   (`ctx.mediaAccess.localRoots`, fail-closed: no roots → every local file is
-  denied; a symlink pointing outside the roots is denied). URLs and buffers go
-  through the regular outbound pipeline and the `file_id` is picked up from
-  the send result.
+  denied; a symlink pointing outside the roots is denied). URLs and buffers fail closed for guest-origin sends; there is no ordinary outbound fallback.
 - Direct uploads: 50 MB per file; photos (jpeg/png/webp) ≤ 10 MB go as
   `sendPhoto`, gif → `sendAnimation`, `video/*` → `sendVideo`, `audio/*` →
   `sendAudio`, everything else (and `asDocument: true`) → `sendDocument`; a
-  rejected photo/video/animation/audio upload is retried once as a document.
+  definitive Bot API 400 media-format rejection may be retried once as a document.
+  Timeouts, unknown outcomes and server errors are not retried as documents.
   MIME by extension: jpg/jpeg/png/webp/gif/heic/bmp, mp4/mov/webm/mkv,
   mp3/m4a/aac/ogg/oga/opus/wav/flac, pdf/md/txt/csv/json/html,
   docx/xlsx/pptx/zip; unknown → `application/octet-stream` (an explicit
@@ -246,8 +260,7 @@ Path: `OPENCLAW_HOTFIX_ULTRAFAST_SESSIONS_FILE`, else
 `sessionKeyIncludes` (default `[":guest:"]`), `sessionKeyPrefixes` (key equals
 the prefix or starts with `<prefix>:`), `sessionKeys` (exact). Only the
 `openai` provider is affected; an explicit `serviceTier` in run, model or agent
-params always wins. The set also patches `normalizeOpenAIServiceTier` to accept
-`"ultrafast"` and keeps `service_tier=ultrafast` on the ChatGPT Codex backend
+params always wins. Upstream now accepts `"ultrafast"`; the set keeps `service_tier=ultrafast` on the ChatGPT Codex backend
 (where upstream strips all tiers). See `examples/hotfix-ultrafast-sessions.json`.
 
 ## Design and security model
@@ -259,8 +272,8 @@ params always wins. The set also patches `normalizeOpenAIServiceTier` to accept
   guest messages).
 - **Tool policy for guest runs.** `gateway` is always denied in `:guest:`
   sessions. In sub-agent completion turns of a guest session (`runId` prefix
-  `announce:`) `message` is denied too — their result must be *text*, which
-  the kit edits into the guest's message. In interactive guest turns
+  `announce:`) `message` is denied too — their result must be final text or authorized local media, which
+  the kit delivers into the original query's inline message. In interactive guest turns
   `message`, `sessions_spawn`, `cron` and `nodes` are available (v1.1.x denied
   them; the owner may re-tighten the list in
   `modules/guest-deny-delivery-tools.mjs`).
@@ -268,9 +281,8 @@ params always wins. The set also patches `normalizeOpenAIServiceTier` to accept
   (`scopes: ["operator.admin"]` on the gateway `agent` launch) only when the
   parent run's `senderIsOwner` is exactly `true`; the parent's own
   owner/non-owner derivation is not changed, and the dispatcher's existing
-  `params.scopes` contract is used — no new authorization path. The two
-  modules (`subagent-inherit-owner-scope.callsite`,
-  `subagent-inherit-owner-scope`) can be removed from `lib/plan.mjs` by an
+  `params.scopes` contract is used — no new authorization path. The
+  `subagent-inherit-owner-scope` module can be removed from `lib/plan.mjs` by an
   operator who prefers least-privilege sub-agents even for the owner.
 - **Inline-or-dropped.** A guest answer never falls back to `sendMessage`. A
   payload of a guest session without a guest query id and without an answered
@@ -316,6 +328,16 @@ Restore the files listed in `backups/<timestamp>/manifest.json` from the
 reinstall the pinned OpenClaw package. Disabling without rollback: set
 `"enabled": false` in the rules file (placeholder/edit/append/media off,
 single `answerGuestQuery` stays).
+
+## Focused offline regression
+
+After applying to a disposable 2026.10.9 package:
+
+    npm run test:ownership -- /path/to/disposable-openclaw/dist
+
+Only synthetic identities/files and mocked transports are used. Tests cover
+old-child/new-query ownership, upload overlap, partial/unknown native receipts
+and the bounded document fallback. They do not contact Telegram.
 
 ## AI assistance
 

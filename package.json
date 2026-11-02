@@ -1,6 +1,6 @@
 {
   "name": "openclaw-telegram-guest-mode",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": false,
   "description": "Telegram Bot API guest-query support for OpenClaw as a portable dist patch layer (placeholder/edit, rich replies, sub-agent finals with owner tool access, media via staging chat).",
   "type": "module",
@@ -32,7 +32,8 @@
     "README.md",
     "CHANGELOG.md",
     "HOTFIX_NOTES.md",
-    "LICENSE"
+    "LICENSE",
+    "tests/"
   ],
   "engines": {
     "node": ">=22"
@@ -41,7 +42,8 @@
     "check:syntax": "node scripts/check-syntax.mjs",
     "dry-run": "node apply-guest-mode.mjs --dry-run",
     "apply": "node apply-guest-mode.mjs",
-    "check:installed": "node check-guest-mode.mjs"
+    "check:installed": "node check-guest-mode.mjs",
+    "test:ownership": "node tests/guest-ownership.test.mjs"
   },
   "license": "MIT"
 }
