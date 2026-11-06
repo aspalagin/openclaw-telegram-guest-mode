@@ -2,7 +2,7 @@
 
 Portable patch layer that adds Telegram Bot API guest-query support
 (`supports_guest_queries` / `guest_message` / `answerGuestQuery`, Bot API 10.3)
-to OpenClaw. Version 1.5.0 supports OpenClaw `2026.10.9` and `2026.11.1`.
+to OpenClaw. Version 1.5.1 supports OpenClaw `2026.10.9` and `2026.11.1`.
 
 This repository is an operator patch, not an upstream OpenClaw release. It
 patches built `dist/*.mjs` bundles in an installed OpenClaw package, so review
@@ -331,6 +331,25 @@ Restore the files listed in `backups/<timestamp>/manifest.json` from the
 reinstall the pinned OpenClaw package. Disabling without rollback: set
 `"enabled": false` in the rules file (placeholder/edit/append/media off,
 single `answerGuestQuery` stays).
+
+## Combining the public hotfix kits on 2026.11.1
+
+Apply rich-media first, threaded-mode second, and **guest-mode 1.5.1 or later last**.
+Guest-mode adds an extra file-ID recording hook when rich-media is present.
+From a directory containing the three repository checkouts:
+
+```bash
+node openclaw-telegram-rich-media-hotfix/scripts/apply-2026-11-1.mjs --package-root /path/to/openclaw --backup-dir ./backups/rich
+node openclaw-threaded-mode-hotfix/scripts/apply-2026-11-1.mjs --package-root /path/to/openclaw --backup-dir ./backups/threaded
+node openclaw-telegram-guest-mode/apply-guest-mode.mjs --package-root /path/to/openclaw --backup-dir ./backups/guest
+node openclaw-telegram-rich-media-hotfix/scripts/check-2026-11-1.mjs --package-root /path/to/openclaw
+node openclaw-threaded-mode-hotfix/scripts/check-2026-11-1.mjs --package-root /path/to/openclaw
+node openclaw-telegram-guest-mode/check-guest-mode.mjs --package-root /path/to/openclaw
+```
+
+If you add rich-media to an already patched guest-mode installation, repeat the
+last guest-mode apply and all three checks before restarting the gateway. Add
+`--with-ultrafast` to the guest apply/check commands when using that optional set.
 
 ## Focused offline regression
 

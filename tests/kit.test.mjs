@@ -33,6 +33,7 @@ try {
   const dry = JSON.parse(run("apply-guest-mode.mjs", [...args, "--dry-run"]));
   assert.equal(dry.status, "dry-run");
   assert.equal(digest(), before, "dry run wrote a bundle");
+  console.log(run("tests/rich-composition.test.mjs", [path.join(root, "dist")]).trim());
   const applied = JSON.parse(run("apply-guest-mode.mjs", [...args, "--backup-dir", tmp]));
   assert.equal(applied.status, "patched");
   assert.equal(JSON.parse(run("check-guest-mode.mjs", args)).ok, true);

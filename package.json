@@ -1,6 +1,6 @@
 {
   "name": "openclaw-telegram-guest-mode",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "private": false,
   "description": "Telegram Bot API guest-query support for OpenClaw as a portable dist patch layer (placeholder/edit, rich replies, sub-agent finals with owner tool access, media via staging chat).",
   "type": "module",

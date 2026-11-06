@@ -60,8 +60,9 @@ function hotfixRecordTelegramSentMedia(chatId, messageId, message) {
 const CALL_OLD = "\t\t\t\tconst resolvedChatId = String(part.result.chat?.id ?? chatId);\n\t\t\t\tconst meta = {\n";
 const CALL_NEW = `\t\t\t\tconst resolvedChatId = String(part.result.chat?.id ?? chatId);\n\t\t\t\thotfixRecordTelegramSentMedia(resolvedChatId, part.messageId, part.result); // ${MARK}\n\t\t\t\tconst meta = {\n`;
 // Rich message with embedded local media (sendRich in the prepared sender) — the sendRichMessage result also carries the file_id (rich_message.blocks).
-const RICH_OLD = "\t\t\t\t\t\t} finally {\n\t\t\t\t\t\t\treleaseTelegramRichLocalMedia(attached.ids);\n\t\t\t\t\t\t}\n\t\t\t\t\t\tconst acceptedParams = {\n\t\t\t\t\t\t\t...sent.acceptedParams,\n\t\t\t\t\t\t\t...markup\n\t\t\t\t\t\t};\n";
-const RICH_NEW = `\t\t\t\t\t\t} finally {\n\t\t\t\t\t\t\treleaseTelegramRichLocalMedia(attached.ids);\n\t\t\t\t\t\t}\n\t\t\t\t\t\tif (attached.ids.length > 0) hotfixRecordTelegramSentMedia(String(sent?.result?.chat?.id ?? config.chatId), sent?.result?.message_id, sent?.result); // ${MARK} (rich-embedded media)\n\t\t\t\t\t\tconst acceptedParams = {\n\t\t\t\t\t\t\t...sent.acceptedParams,\n\t\t\t\t\t\t\t...markup\n\t\t\t\t\t\t};\n`;
+// 11.1 returns acceptedParams inline; anchor only on the shared finally block.
+const RICH_OLD = "\t\t\t\t\t\t} finally {\n\t\t\t\t\t\t\treleaseTelegramRichLocalMedia(attached.ids);\n\t\t\t\t\t\t}\n";
+const RICH_NEW = `\t\t\t\t\t\t} finally {\n\t\t\t\t\t\t\treleaseTelegramRichLocalMedia(attached.ids);\n\t\t\t\t\t\t}\n\t\t\t\t\t\tif (attached.ids.length > 0) hotfixRecordTelegramSentMedia(String(sent?.result?.chat?.id ?? config.chatId), sent?.result?.message_id, sent?.result); // ${MARK} (rich-embedded media)\n`;
 // The rich-embedded hook (RICH_OLD/RICH_NEW) anchors on code that only exists when the operator's separate "rich local
 // media" hotfix is installed (releaseTelegramRichLocalMedia). Vanilla OpenClaw has no such path: local media sent
 // together with text goes through acceptMany, so the first hook already records the file_id. The rich hook is applied
