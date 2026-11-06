@@ -143,10 +143,11 @@ function hotfixGuestMarkDelivered(progress) {
   // спредится и в deliverMediaReply. Guest-поля добавляются только в вызов deliverTextReply (не в textReply) — медиа-путь и его
   // внутренние deliverTextReply({...params}) (followUpText/voice fallback) guest-ветку не видят; для guest медиа-ветка недостижима.
   // 10.5: bot/token в вызов больше не нужны — guest-ветка берёт их из config замыкания createReplyDeliverer.
+  // Rich-media prefixes this same branch with `} else `; preserve that prefix.
   next = replaceOnce(
     next,
-    `\t\t\tif (mediaList.length === 0 && resolvedReplyText) firstDeliveredMessageId = await deliverTextReply(textReply);\n`,
-    `\t\t\tif (mediaList.length === 0 && resolvedReplyText || params.guestQueryId) firstDeliveredMessageId = await deliverTextReply({
+    `if (mediaList.length === 0 && resolvedReplyText) firstDeliveredMessageId = await deliverTextReply(textReply);\n`,
+    `if (mediaList.length === 0 && resolvedReplyText || params.guestQueryId) firstDeliveredMessageId = await deliverTextReply({
 \t\t\t\t...textReply,
 \t\t\t\tguestQueryId: params.guestQueryId,
 \t\t\t\ttext: params.guestQueryId && !reply.text ? "[Media attachment is not available in Telegram guest mode.]" : reply.text || ""

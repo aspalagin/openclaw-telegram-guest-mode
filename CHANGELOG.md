@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.1 — 2026-11-06
+
+- Compose with the public 2026.11.1 rich-media kit: accept its else-if delivery
+  branch and record rich-media file IDs without depending on the old return layout.
+- Document rich → threaded → guest ordering and guest reapply when rich-media is
+  added later. Cover both integration anchors in the offline CI regression.
+
 ## 1.5.0 — 2026-11-06
 
 - Add OpenClaw 2026.11.1 support while retaining 2026.10.9.
