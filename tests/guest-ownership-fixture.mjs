@@ -1,13 +1,19 @@
 // Synthetic fixtures only. Every transport is mocked; no credentials or network access.
-import fs from 'node:fs';
-import path from 'node:path';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
-const R=path.dirname(new URL(import.meta.url).pathname);
+import { Corpus, walkJs } from '../lib/kit.mjs';
 const D=process.argv[2];
-if (!D) throw new Error('Pass the dist directory of a disposable, patched OpenClaw 2026.10.9 package');
-const baseline=process.argv.includes('--baseline');
-const source=n=>fs.readFileSync(D+'/'+n,'utf8');
+if (!D) throw new Error('Pass the dist directory of a disposable, patched supported OpenClaw package');
+const corpus = new Corpus(walkJs(D));
+const targets = {
+ 'telegram-delivery': ['function createReplyDeliverer(', 'hotfix: guest-ack-edit (registry)'],
+ 'command-delivery': ['const completeDelivery =', 'hotfix: guest-announce-final-inline'],
+ 'outbound-payloads': ['function projectOutboundPayloadPlanForDelivery('],
+ 'delivery-result': ['function buildDeliveryResult('],
+ 'delivery-evidence': ['function getAutomaticDeliveryEvidence('],
+ 'announce-delivery': ['function createDirectAnnounceResponseClassifier('],
+};
+const source = name => corpus.read(corpus.findOne(name, targets[name]));
 let pass=0,fail=0, networkCalls=0;
 async function test(name,fn){try{await fn();pass++;console.log('PASS '+name);}catch(e){fail++;console.log('FAIL '+name+': '+e.stack);}}
 const S='agent:test:telegram:direct:1:guest:1-at-2';
@@ -22,7 +28,7 @@ function registry(){
  async loadWebMedia(file,options){assert.deepEqual(Array.from(options.localRoots),['/fixture']);if(!file.startsWith('/fixture/'))throw Error('outside allowed roots');return {buffer:Buffer.from('synthetic harmless file'),contentType:'text/plain',fileName:'sample.txt'};}
  };
  vm.createContext(box);
- const s=source('delivery-B2vxfnEv.mjs');const a=s.indexOf('//#region hotfix: guest-ack-edit (registry)');const b=s.indexOf('function createReplyDeliverer(',a);
+ const s=source('telegram-delivery');const a=s.indexOf('//#region hotfix: guest-ack-edit (registry)');const b=s.indexOf('function createReplyDeliverer(',a);
  vm.runInContext(s.slice(a,b)+'\nglobalThis.markAnswered=hotfixGuestAckMarkAnswered; globalThis.placeholder=hotfixGuestAckSendPlaceholder;',box);
  const r=box.__openclawHotfixGuestAck;
  const bot={api:{raw:{async editMessageText(body){calls.push({edit:body});if(failEdit)throw Error('synthetic edit denied');return true;},async editMessageMedia(body){calls.push({media:body});if(failEdit)throw Error('synthetic edit denied');return true;}}}};

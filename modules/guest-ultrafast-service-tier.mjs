@@ -132,16 +132,23 @@ const ANCHOR = "async function prepareEmbeddedAttemptTransport(input) {";
 const BEFORE = "\tconst streamExtraParamsOverride = {\n\t\t...attempt.streamParams,\n\t\tfastMode: attempt.fastMode,\n\t\t...attempt.trigger === \"memory\" ? {\n";
 const AFTER = `\tconst streamExtraParamsOverride = {\n\t\t...attempt.streamParams,\n\t\tfastMode: attempt.fastMode,\n\t\t...resolveGuestUltrafastServiceTierOverride(attempt, input.sessionAgentId) /* ${MARK} */,\n\t\t...attempt.trigger === "memory" ? {\n`;
 export function patch(source) {
-  if (source.includes(HELPER) && source.includes(AFTER)) return source;
+  const helper = helperFor(source);
+  if (source.includes(helper) && source.includes(AFTER)) return source;
   let out = source;
-  if (!out.includes(HELPER)) out = replaceRegion(out, { start: REGION_START, body: HELPER, anchor: ANCHOR, label: "guest-ultrafast helper before prepareEmbeddedAttemptTransport" }); // fresh insert or upgrade of an earlier revision
+  if (!out.includes(helper)) out = replaceRegion(out, { start: REGION_START, body: helper, anchor: ANCHOR, label: "guest-ultrafast helper before prepareEmbeddedAttemptTransport" }); // fresh insert or upgrade of an earlier revision
   if (!out.includes(AFTER)) out = replaceOnce(out, BEFORE, AFTER, "streamExtraParamsOverride: guest ultrafast default");
   return out;
+}
+// Bundler aliases differ between 10.9 (log$6) and 11.1 (log$7).
+function helperFor(source) {
+  const logger = source.match(/import \{ \w+ as (log\$\d+) \} from "\.\/logger-[\w-]+\.mjs";/);
+  if (!logger) throw new Error("guest-ultrafast: logger import missing");
+  return HELPER.replaceAll("log$6", logger[1]);
 }
 export const check = { assertions: [
   contains(MARK, "guest-ultrafast-service-tier marker"),
   contains(V2_MARK, "v2 marker (rules file)"),
-  contains(HELPER, "current helper region (whole)"),
+  (source) => contains(helperFor(source), "current helper region with the imported logger")(source),
   contains(AFTER, "streamExtraParamsOverride with the guest-ultrafast override"),
   contains(`const HOTFIX_ULTRAFAST_SESSIONS_FILE = ${rulesFileExpression("OPENCLAW_HOTFIX_ULTRAFAST_SESSIONS_FILE", "hotfix-ultrafast-sessions.json")};`, "rules file resolved from env / OpenClaw state dir (not hard-coded)"),
   (c) => /HOTFIX_ULTRAFAST_SESSIONS_FILE = "\//.test(c) ? "hard-coded absolute rules path" : null,
@@ -152,7 +159,6 @@ export const check = { assertions: [
   notContains("if (typeof sessionKey !== \"string\" || !sessionKey.includes(\":guest:\")) return {};", "v1 :guest: gate remnant"),
   // helper dependencies present in the chunk (fs and the logger)
   contains("import fs from \"node:fs\";", "import fs in the chunk"),
-  contains("as log$6 } from \"./logger-", "import log$6 in the chunk"),
   // drift: the override must still reach both resolve paths (runtimePlan.transport.resolveExtraParams and resolvePreparedExtraParams)
   (c) => count(c, "extraParamsOverride: streamExtraParamsOverride") === 1 && c.includes("runtimePlan?.transport.resolveExtraParams(extraParamsContext)") && c.includes("...extraParamsContext,") ? null : `expected shared extraParamsContext passed to both resolvers; override occurrences, found ${count(c, "extraParamsOverride: streamExtraParamsOverride")}`,
   // drift: exactly one helper region; helper declared/called once

@@ -39,6 +39,7 @@ const sha256 = (text) => crypto.createHash("sha256").update(text).digest("hex");
 const timestamp = () => new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "Z");
 function nodeCheck(file) {
   const r = spawnSync(process.execPath, ["--check", file], { encoding: "utf8" });
+  if (r.error) return r.error.message;
   return r.status === 0 ? null : (r.stderr || r.stdout || "node --check failed").slice(0, 600);
 }
 

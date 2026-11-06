@@ -1,6 +1,6 @@
-# Current port: 1.4.0 / OpenClaw 2026.10.9
+# Current port: 1.5.0 / OpenClaw 2026.10.9 and 2026.11.1
 
-The current kit is pinned to 2026.10.9. Earlier builds discussed below are
+The current kit supports 2026.10.9 and 2026.11.1. Earlier builds discussed below are
 historical. Content locators/assertions follow the new ingress, reply-deliverer,
 follow-up, command-delivery and spawn layouts. Upstream allowed updates,
 owner-context forwarding and Ultrafast value normalization need no old patches.
@@ -16,6 +16,21 @@ Verification: syntax, disposable pristine-package apply/check, repeat apply and
 dry-run, and bounded network-free regressions. No live Telegram E2E or restart
 recovery is claimed. Bindings/receipts remain process-local; missing ownership
 and pre-frozen mixed-query cohorts fail closed. No new authority or persistence.
+
+## 2026.11.1 changes
+
+- Guest tool denial stays in the shared policy filter for both turn and session
+  projections; upstream owner-only gating and scheduled-message admission remain.
+- The guest session suffix is applied after upstream target-route resolution.
+- Follow-up and admission anchors, blocked notices and nested announce calls track
+  the new upstream layout. Existing query ownership and native receipts are retained.
+- Progress disposal is allowed only through the reviewed `onDispose` registration.
+- Owner child dispatch remains inside upstream's source-execution scope wrapper.
+- Optional Ultrafast resolves the actual imported logger alias on each baseline.
+
+The CI matrix applies the kit and optional set to both pristine npm tarballs,
+checks a non-writing dry run and idempotent reapply, and executes mocked ownership,
+policy and Ultrafast regressions. No live transport or server configuration is used.
 
 ## Historical notes (earlier kit versions)
 

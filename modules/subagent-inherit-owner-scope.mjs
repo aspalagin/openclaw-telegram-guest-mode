@@ -32,7 +32,7 @@ export function patch(source) {
 export const check = { gate: "required", assertions: [
   contains(C_AFTER, "owner parent launches child with operator.admin scopes"),
   // C стоит внутри launchChildRun (вызов callNativeSubagentGateway(withSubagentGatewayExecutionIdentity({ method: "agent", … }))).
-  (c) => { const l = c.indexOf("const launchChildRun = async (assertDispatchCurrent) => {"); const p = c.indexOf(C_LINE); const g = c.indexOf("const launch = await callNativeSubagentGateway(withSubagentGatewayExecutionIdentity({\n\t\t\t\tmethod: \"agent\",", l); return l !== -1 && g > l && p > g && p - g < 400 ? null : "admin scopes not inside launchChildRun's agent dispatch"; },
+  (c) => { const l = c.indexOf("const launchChildRun = async (assertDispatchCurrent) => {"); const p = c.indexOf(C_LINE); const wrapped = c.includes("const launch = await runWithAgentToolSourceExecutionScope(assertDispatchCurrent,"); const g = c.indexOf((wrapped ? "const launch = await runWithAgentToolSourceExecutionScope(assertDispatchCurrent, () => " : "const launch = await ") + "callNativeSubagentGateway(withSubagentGatewayExecutionIdentity({\n\t\t\t\tmethod: \"agent\",", l); return l !== -1 && g > l && p > g && p - g < 400 ? null : "admin scopes not inside launchChildRun's agent dispatch"; },
   // Шаг B — апстрим: без него ctx.senderIsOwner всегда undefined и порт мёртв.
   contains(UP_B_CTX, "upstream inheritedSpawnContext forwards senderIsOwner (step B)"),
   (c) => { const n = c.indexOf(UP_B_NATIVE); return n !== -1 && c.indexOf(UP_B_SPREAD, n) !== -1 ? null : "native spawnSubagentDirect no longer receives ...inheritedSpawnContext() (ctx.senderIsOwner lost)"; },

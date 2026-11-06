@@ -7,7 +7,6 @@ export const target = {
  "key": "agentTools",
  "label": "agent tools policy bundle",
  "needles": [
-  "label: \"gateway sender owner-only tools\"",
   "function createEmbeddedMessageInvocationPolicy(params)",
   "const messageInvocationPolicy = createEmbeddedMessageInvocationPolicy({"
  ]
@@ -57,6 +56,34 @@ function patchGuestDenyDeliveryTools(source) {
     if (out.includes(DENY_V2)) out = replaceOnce(out, DENY_V2, DENY_NEW, "guest deny list v2 → v4");
     if (out.includes(DENY_V3)) out = replaceOnce(out, DENY_V3, DENY_NEW, "guest deny list v3 → v4 (announce:sessions-send excluded)");
     if (!out.includes(CALLSITE_RUNID)) out = replaceOnce(out, CALLSITE_SESSION, `${CALLSITE_SESSION}${CALLSITE_RUNID}`, "guest deny call site: add guestRunId (v3)");
+    return out;
+  }
+  // 11.1 uses one policy filter for both turn and completion-session tools.
+  if (source.includes("function resolveTurnToolSurface(params) {")) {
+    let out = replaceOnce(
+      source,
+      "\t\tpluginMetadataSnapshot: options?.preparedModelRuntime?.metadataSnapshot,\n\t\tcatalog: () => ({\n",
+      "\t\tpluginMetadataSnapshot: options?.preparedModelRuntime?.metadataSnapshot,\n" + CALLSITE_SESSION + CALLSITE_RUNID + "\t\tcatalog: () => ({\n",
+      "guest deny call site: metadata snapshot before catalog",
+    );
+    out = replaceOnce(
+      out,
+      "\t\t\t\tincludeRuntimeToolPolicy: true,\n\t\t\t\tunavailableCoreToolReason\n",
+      [
+        "\t\t\t\tincludeRuntimeToolPolicy: true,",
+        "\t\t\t\t//#region hotfix: guest-deny-delivery-tools (2026.11.1: preserve guest deny in both turn and session projections)",
+        "\t\t\t\tadditionalStepsAfterSandbox: typeof params.guestSessionKey === \"string\" && params.guestSessionKey.includes(\":guest:\") ? [{",
+        `\t\t\t\t\t${DENY_NEW}`,
+        "\t\t\t\t\tsource: { kind: \"session\" },",
+        "\t\t\t\t\tlabel: \"guest session tools.deny\",",
+        "\t\t\t\t\tunavailableCoreToolReason",
+        "\t\t\t\t}] : [],",
+        "\t\t\t\t//#endregion",
+        "\t\t\t\tunavailableCoreToolReason",
+        "",
+      ].join("\n"),
+      "guest deny pipeline step after sandbox",
+    );
     return out;
   }
   let out = replaceOnce(
@@ -151,11 +178,24 @@ export const check = { gate: "required", assertions: [
       // здесь проверяем, что в этом чанке options?.runId используется и помимо нас — т.е. поле контракта options живо)
       (src) => (src.split("options?.runId").length - 1) >= 2 ? null : "options?.runId используется только нашей строкой (контракт options.runId в agent-tools исчез?)",
       // дрейф: итоговый набор инструментов рана должен идти через тот же filter(), куда встроен гостевой шаг
-      contains("const subagentFiltered = messageInvocationPolicy.filter(", "run tool set built by messageInvocationPolicy.filter (drift: new bypass path?)"),
+      (src) => src.includes("function resolveTurnToolSurface(params) {")
+        ? contains("const inheritableTools = completeTurnTools(messageInvocationPolicy.filter(capabilityProfile, onPolicyFilter));", "turn tools use guest policy")(src)
+          ?? contains('sessionTools: capabilityProfile.policy.requesterPolicySource === "completion-handoff" ? completeTurnTools(messageInvocationPolicy.filter(capabilityProfile, void 0, "session")) : void 0,', "session tools use guest policy")(src)
+        : contains("const subagentFiltered = messageInvocationPolicy.filter(", "run tools use guest policy")(src),
       (src) => (src.split("additionalStepsAfterSandbox:").length - 1) === 1 ? null : "expected exactly one additionalStepsAfterSandbox pipeline in agent-tools (drift: second policy pipeline bypasses guest deny?)",
       (src) => (src.split("guestRunId").length - 1) === 4 ? null : `guestRunId ожидался ровно 4 раза (call site + typeof/startsWith/!startsWith sessions-send в deny step), найдено ${src.split("guestRunId").length - 1}`,
       // v4: проверка `announce:` в deny-шаге ровно одна и в паре с исключением sessions_send (нет второй непарной проверки)
       (src) => { const a = src.split('params.guestRunId.startsWith("announce:")').length - 1; const x = src.split(`!params.guestRunId.startsWith("${SESSIONS_SEND_COMPLETION_PREFIX}")`).length - 1; return a === 1 && x === 1 ? null : `ожидалась 1 проверка guestRunId announce: и 1 исключение ${SESSIONS_SEND_COMPLETION_PREFIX}, найдено ${a}/${x}`; },
       // сторож апстрима — последним (читает соседний чанк)
+      // The shared upstream pipeline must still consume our extension point.
+      (src, file) => {
+        if (!src.includes("function resolveTurnToolSurface(params) {")) return null;
+        const m = src.match(/import \{[^}]*\b(\w+) as buildConversationToolPolicyPipelineSteps[^}]*\} from "\.\/(conversation-tool-policy-pipeline-[\w-]+\.mjs)";/);
+        if (!m || !file) return "guest deny: pipeline import or dist path missing";
+        try {
+          const sibling = fs.readFileSync(path.join(path.dirname(file), m[2]), "utf8");
+          return sibling.includes("...params.additionalStepsAfterSandbox ?? [],") && sibling.includes(`buildConversationToolPolicyPipelineSteps as ${m[1]}`) ? null : "guest deny: shared pipeline extension point changed";
+        } catch (e) { return `guest deny: pipeline unreadable: ${e.message}`; }
+      },
       sessionsSendCompletionKeyGuard,
     ] };

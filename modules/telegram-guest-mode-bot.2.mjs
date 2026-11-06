@@ -62,6 +62,14 @@ function resolveTelegramGuestQueryIdFromPayload(ctxPayload) {
     `\t\tif (threadSpec.scope === "direct-messages") return;`,
     `\t\tif (isGuest || threadSpec.scope === "direct-messages") return;`,
   );
+  if (next.includes("const { sessionKey } = route;")) {
+    // 10.10: upstream moved route policy into applyTelegramTargetSession. Preserve its
+    // non-guest result; guest suffix always identifies a distinct session, never main.
+    next = replaceOnce(next,
+      `\tconst { sessionKey } = route;\n\tconst activationOverride = await resolveGroupActivation({`,
+      `\tif (isGuest) route = { ...route, sessionKey: resolveTelegramGuestSessionKey(route.sessionKey, msg), lastRoutePolicy: "session" }; // hotfix: guest target route\n\tconst { sessionKey } = route;\n\tconst activationOverride = await resolveGroupActivation({`,
+      "Telegram guest session key after applyTelegramTargetSession");
+  } else {
   next = replaceOnce(
     next,
     `\tconst sessionKey = resolveTelegramTargetSession({
@@ -87,6 +95,7 @@ function resolveTelegramGuestQueryIdFromPayload(ctxPayload) {
 \troute = {`,
     "Telegram guest session key",
   );
+  }
   next = replaceOnce(
     next,
     `\tconst ctxPayload = await sessionRuntime.buildChannelInboundEventContext({`,
@@ -164,7 +173,7 @@ export const check = { gate: "required", assertions: [
   contains("guestModeDeliveryHint", "guest delivery hint"),
   contains("guestQueryId: resolveTelegramGuestQueryIdFromPayload(turn.context.ctxPayload),", "guest delivery option"),
   contains("!isGuestQuery && params.streamMode", "guest stream suppression"),
-  contains("const sessionKey = isGuest ? resolveTelegramGuestSessionKey(threadedSessionKey, msg) : threadedSessionKey;\n\troute = {", "guest session key feeds route.sessionKey (9.7: resolveTelegramTargetSession)"),
+  (source) => source.includes("const { sessionKey } = route;") ? contains('if (isGuest) route = { ...route, sessionKey: resolveTelegramGuestSessionKey(route.sessionKey, msg), lastRoutePolicy: "session" };', "guest route after applyTelegramTargetSession")(source) : contains("const sessionKey = isGuest ? resolveTelegramGuestSessionKey(threadedSessionKey, msg) : threadedSessionKey;\n\troute = {", "guest session key feeds route.sessionKey (9.7: resolveTelegramTargetSession)")(source),
   notContains('\tif (threadSpec.scope === "direct-messages") return;', "unguarded chat-action path (new sendChatAction variant without isGuest)"),
   contains("if (options?.durable && durableDelivery && projectionSequence.isFresh() && !resolveTelegramGuestQueryIdFromPayload(turn.context.ctxPayload)) {", "guest durable suppression"),
   // 2026-09-30 (по запросу G2): durable-путь (telegramDeps.deliverStructuredInboundReplyWithMessageSendContext → core durable-delivery)

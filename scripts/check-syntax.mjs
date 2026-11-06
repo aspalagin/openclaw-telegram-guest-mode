@@ -11,7 +11,7 @@ for (const dir of ["lib", "modules", "tests"]) for (const name of fs.readdirSync
 let failed = 0;
 for (const rel of files) {
   const r = spawnSync(process.execPath, ["--check", path.join(root, rel)], { encoding: "utf8" });
-  if (r.status !== 0) { failed++; console.error(`${rel}: ${(r.stderr || r.stdout || "node --check failed").trim()}`); }
+  if (r.error || r.status !== 0) { failed++; console.error(`${rel}: ${(r.error?.message || r.stderr || r.stdout || "node --check failed").trim()}`); }
 }
 console.log(`check:syntax ${files.length - failed}/${files.length} ok`);
 process.exitCode = failed ? 1 : 0;
