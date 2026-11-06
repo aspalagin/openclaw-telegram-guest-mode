@@ -57,12 +57,19 @@ const FN_NEW = [
 ].join("\n");
 const CALL_OLD = "\t\tconst replyInstruction = buildAnnounceReplyInstruction({\n\t\t\trequesterIsSubagent,\n";
 const CALL_NEW = `\t\tconst replyInstruction = buildAnnounceReplyInstruction({\n\t\t\tguestRequester: typeof targetRequesterSessionKey === "string" && targetRequesterSessionKey.includes(":guest:"), // ${MARK}\n\t\t\trequesterIsSubagent,\n`;
+const CALLS = [
+  [CALL_OLD, CALL_NEW],
+  [CALL_OLD.replace(/^\t/gm, "\t\t"), CALL_NEW.replace(/^\t/gm, "\t\t")],
+];
 export function patch(source) {
   let next = source;
   const old = [FN_V2, FN_V1].find((candidate) => next.includes(candidate));
   if (old) next = replaceOnce(next, old, FN_NEW, "buildAnnounceReplyInstruction wrapper upgrade (earlier revision → v3)");
   if (!next.includes(FN_NEW)) next = replaceOnce(next, FN_OLD, FN_NEW, "buildAnnounceReplyInstruction wrapper (guest requester)");
-  if (!next.includes(CALL_NEW)) next = replaceOnce(next, CALL_OLD, CALL_NEW, "buildAnnounceReplyInstruction call site (guestRequester)");
+  if (!CALLS.some(([,after]) => next.includes(after))) {
+    const [before,after] = CALLS.find(([before]) => next.includes(before)) ?? CALLS[0];
+    next = replaceOnce(next, before, after, "buildAnnounceReplyInstruction call site (guestRequester)");
+  }
   return next;
 }
 export const check = { assertions: [
@@ -70,7 +77,7 @@ export const check = { assertions: [
   contains(FN_NEW, "buildAnnounceReplyInstruction wrapper with the guest branch (v3)"),
   notContains(FN_V1, "wrapper v1 remnant"),
   notContains(FN_V2, "wrapper v2 (kit v1.2.0) remnant"),
-  contains(CALL_NEW, "guestRequester at the call site (targetRequesterSessionKey)"),
+  (source) => CALLS.some(([,after]) => source.includes(after)) ? null : "missing guestRequester at the call site",
   contains(JSON.stringify(HOTFIX_GUEST_ANNOUNCE_INSTRUCTION), "guest instruction text (whole)"),
   contains(HOTFIX_GUEST_PRIVATE_COMPLETION_PREFIX, "guest private-completion instruction text"),
   notContains("function buildAnnounceReplyInstruction(params) {\n\tconst modelRouteInstruction", "unpatched buildAnnounceReplyInstruction"),
@@ -80,5 +87,5 @@ export const check = { assertions: [
   contains("if (params.completionTarget === \"parent\") return SUBAGENT_PRIVATE_COMPLETION_INSTRUCTION;", "upstream completionTarget parent branch"),
   (c) => count(c, "SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION") >= 2 ? null : "SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION not imported/used in the chunk",
   // targetRequesterSessionKey must be declared in the same function before the call
-  (c) => { const decl = c.indexOf("let targetRequesterSessionKey = params.requesterSessionKey;"); const call = c.indexOf(CALL_NEW); return decl >= 0 && call > decl ? null : "targetRequesterSessionKey not declared before the buildAnnounceReplyInstruction call"; },
+  (c) => { const decl = c.indexOf("let targetRequesterSessionKey = params.requesterSessionKey;"); const call = Math.max(...CALLS.map(([,after]) => c.indexOf(after))); return decl >= 0 && call > decl ? null : "targetRequesterSessionKey not declared before the buildAnnounceReplyInstruction call"; },
 ] };

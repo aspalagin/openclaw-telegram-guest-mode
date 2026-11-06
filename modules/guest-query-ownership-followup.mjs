@@ -25,5 +25,5 @@ const changes=[
     "\t\tonToolResult: async (payload) => {\n\t\t\tif (turn.queued.run.sessionKey?.includes(\":guest:\")) return false; // guest suppression must not become visibleReplyDelivered\n\t\t\treturn await enqueueProgressResult"
   ]
 ];
-export function patch(source) { let s=source; for (const [oldText,newText] of changes) { if (!s.includes(newText)) s=replaceOnce(s,oldText,newText,label); } return s; }
-export const check={gate:"required",assertions: changes.map(([,newText])=>contains(newText,label))};
+export function patch(source) { let s=source; for (let [oldText,newText] of changes) { if (s.includes("const readNoticeSessionEntry = async () => replySessionKey")) { oldText=oldText.replace("readTurnSessionEntry = ()", "readNoticeSessionEntry = async ()"); newText=newText.replace("readTurnSessionEntry = ()", "readNoticeSessionEntry = async ()"); } if (!s.includes(newText)) s=replaceOnce(s,oldText,newText,label); } return s; }
+export const check={gate:"required",assertions: changes.map(([,newText])=>(source)=>contains(source.includes("const readNoticeSessionEntry = async () => replySessionKey") ? newText.replace("readTurnSessionEntry = ()", "readNoticeSessionEntry = async ()") : newText,label)(source))};

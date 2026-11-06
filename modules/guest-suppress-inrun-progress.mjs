@@ -67,10 +67,12 @@ export function patch(source) { return patchGuestSuppressInrunProgress(source); 
 // Сторож дрейфа: verboseProgress читают только noteRunVerbosity и четыре гардированные строки state; флаг объявлен до state в той же функции.
 const onlyGatedReaders = (src) => {
   const reads = src.match(/verboseProgress\.[A-Za-z]+/g) ?? [];
-  const allowed = new Set(["verboseProgress.noteRunVerbosity", "verboseProgress.shouldEmit", "verboseProgress.shouldEmitFull", "verboseProgress.shouldEmitAsync", "verboseProgress.shouldEmitFullAsync"]);
+  const hasRelease = src.includes("verboseProgress.release");
+  if (hasRelease && !src.includes("onDispose?.(verboseProgress.release);")) return "verboseProgress.release is no longer the reviewed disposal registration";
+  const allowed = new Set(["verboseProgress.release", "verboseProgress.noteRunVerbosity", "verboseProgress.shouldEmit", "verboseProgress.shouldEmitFull", "verboseProgress.shouldEmitAsync", "verboseProgress.shouldEmitFullAsync"]);
   const extra = reads.filter((r) => !allowed.has(r));
   if (extra.length) return `новые читатели verboseProgress: ${[...new Set(extra)].join(", ")}`;
-  if (reads.length !== 5) return `ожидалось 5 чтений verboseProgress.* (noteRunVerbosity + 4 гардированных), найдено ${reads.length}`;
+  if (reads.length !== (hasRelease ? 6 : 5)) return `unexpected verboseProgress readers (4 gated, noteRunVerbosity, optional disposal), найдено ${reads.length}`;
   const flag = src.indexOf(FLAG_LINE); const state = src.indexOf(STATE_NEW); const fn = src.lastIndexOf("\nasync function gatherDispatchRequest(", flag);
   const nextFn = src.indexOf("\nasync function ", flag + 1);
   if (flag < 0 || state < 0 || fn < 0 || !(flag < state) || (nextFn >= 0 && nextFn < state)) return "флаг гостя и гардированный state не в одной gatherDispatchRequest";

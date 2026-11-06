@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.5.0 — 2026-11-06
+
+- Add OpenClaw 2026.11.1 support while retaining 2026.10.9.
+- Keep guest denial on both turn/session tool surfaces and preserve upstream owner
+  checks; adapt route, follow-up ownership, notice and announce anchors.
+- Preserve source-scoped child dispatch and reviewed progress disposal.
+- Resolve the optional Ultrafast logger from the actual bundle import.
+- Add a two-version CI matrix with full apply/check, non-writing dry run,
+  idempotence, version refusal and offline ownership/policy/Ultrafast regressions.
+- Locate test bundles by content instead of hashed filenames. Report syntax-check
+  process launch errors instead of treating them as successful checks.
+
 ## 1.4.0 — 2026-11-02
 
 - Port the existing kit to OpenClaw 2026.10.9; retire upstream-covered patches.

@@ -2,7 +2,7 @@
 
 Portable patch layer that adds Telegram Bot API guest-query support
 (`supports_guest_queries` / `guest_message` / `answerGuestQuery`, Bot API 10.3)
-to OpenClaw. Version 1.4.0 targets OpenClaw `2026.10.9`.
+to OpenClaw. Version 1.5.0 supports OpenClaw `2026.10.9` and `2026.11.1`.
 
 This repository is an operator patch, not an upstream OpenClaw release. It
 patches built `dist/*.mjs` bundles in an installed OpenClaw package, so review
@@ -66,10 +66,13 @@ it before running it on a production host.
   default on the `openai` provider, with an explicit `params.serviceTier`
   always taking precedence.
 
-## Version 1.4.0: query-owned delivery
+## Version 1.5.0: OpenClaw 2026.11.1 compatibility
 
-This port targets **OpenClaw 2026.10.9 only**. Older kit versions remain in Git
-history; this version does not claim compatibility with 2026.9.7.
+This port supports **OpenClaw 2026.10.9 and 2026.11.1**. Both versions run in CI;
+other versions require a separate port review. On 11.1, guest restrictions cover
+both the turn and completion-session tool surfaces while upstream owner checks
+remain active. Session routing, follow-up ownership and optional Ultrafast use the
+corresponding upstream layouts. The query-owned delivery behavior is retained:
 
 - Original query ownership follows queued runs, children, announce and settle.
   A newer guest query cannot receive an older child's text or file.
@@ -158,14 +161,14 @@ OPENCLAW_PACKAGE_ROOT=/usr/lib/node_modules/openclaw node check-guest-mode.mjs
 sudo systemctl restart openclaw-gateway
 ```
 
-Re-running apply reports unchanged with zero writes. This port targets a pristine
-2026.10.9 package, not an in-place upgrade of an earlier OpenClaw build.
+Re-running apply reports unchanged with zero writes. Apply this kit to a pristine
+2026.10.9 or 2026.11.1 package after installing that OpenClaw release.
 The optional silent-completion fallback guard reports not applicable on pristine
 builds. Guest allowed updates and owner-context forwarding are now upstream.
 
 > **This patches the installed dist.** Any OpenClaw update reverts the patched
 > bundles: re-run apply and check after every update. The anchors are pinned
-> to OpenClaw `2026.10.9` (`TESTED_OPENCLAW_VERSIONS` in `lib/kit.mjs`). On any
+> to OpenClaw `2026.10.9` and `2026.11.1` (`TESTED_OPENCLAW_VERSIONS` in `lib/kit.mjs`). On any
 > other version the apply **refuses to run** (`status=refused`, nothing
 > written) unless `--allow-untested` is given; with the flag, unmatched anchors
 > still fail the whole run before anything is written, but matching anchors on
@@ -331,9 +334,18 @@ single `answerGuestQuery` stays).
 
 ## Focused offline regression
 
-After applying to a disposable 2026.10.9 package:
+After applying to either supported disposable package:
 
     npm run test:ownership -- /path/to/disposable-openclaw/dist
+    npm run test:policy -- /path/to/disposable-openclaw/dist
+
+For the full CI sequence, supply a **pristine disposable package** with its matching
+`@openclaw/ai` dependency. This command applies patches to that test copy:
+
+    npm run test:kit -- /path/to/disposable-openclaw
+
+It checks syntax during apply, an unchanged dry run, the full optional Ultrafast
+set, ownership/media and tool-policy regressions, idempotence and version refusal.
 
 Only synthetic identities/files and mocked transports are used. Tests cover
 old-child/new-query ownership, upload overlap, partial/unknown native receipts
