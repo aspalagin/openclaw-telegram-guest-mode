@@ -1,4 +1,4 @@
-# Current port: 1.5.1 / OpenClaw 2026.10.9 and 2026.11.1
+# Current port: 1.5.2 / OpenClaw 2026.10.9 and 2026.11.1
 
 The current kit supports 2026.10.9 and 2026.11.1. Earlier builds discussed below are
 historical. Content locators/assertions follow the new ingress, reply-deliverer,

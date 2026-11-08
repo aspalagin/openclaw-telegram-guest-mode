@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.2 — 2026-11-08
+
+- Finalize the guest placeholder timer after a confirmed terminal media-only reply,
+  preserving attached videos in the same inline message.
+- Keep `final:false` progress running and retain ambiguous-receipt safeguards.
+
 ## 1.5.1 — 2026-11-06
 
 - Compose with the public 2026.11.1 rich-media kit: accept its else-if delivery
