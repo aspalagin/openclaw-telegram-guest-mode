@@ -83,12 +83,24 @@ async function hotfixGuestMediaStagingDirect(ctx, staging) {
 \t\t}
 \t\ttry {
 \t\t\tconst result = await registry.stageAndAttachMedia(staging.sessionKey, { path: local.real, guestQueryId: staging.guestQueryId, runId: staging.runId, fileName: staging.locals.length === 1 ? staging.fileName : void 0, mimeType: staging.locals.length === 1 ? staging.mimeType : void 0, caption: staging.caption, stagingChatId: staging.stagingTo, forceDocument: staging.forceDocument });
-\t\t\titems.push({ fileName: result?.fileName ?? fileName, delivered: result?.delivered === true, mode: result?.mode, kind: result?.kind, size: result?.size, uploadMethod: result?.uploadMethod, stagingMessageId: result?.stagingMessageId, ...(result?.delivered ? {} : { reason: result?.reason ?? "unknown" }) });
+\t\t\titems.push({ fileName: result?.fileName ?? fileName, delivered: result?.delivered === true, ambiguous: result?.ambiguous === true, mode: result?.mode, kind: result?.kind, size: result?.size, uploadMethod: result?.uploadMethod, stagingMessageId: result?.stagingMessageId, ...(result?.delivered ? {} : { reason: result?.reason ?? "unknown" }) });
 \t\t} catch (err) {
 \t\t\titems.push({ fileName, delivered: false, reason: formatErrorMessage(err) });
 \t\t}
 \t}
 \tconst delivered = items.length > 0 && items.every((item) => item.delivered === true);
+\t// hotfix: guest-media-terminal — message.send is final unless final:false; reuse query-bound cleanup.
+\tif (delivered && ctx.params.final !== false && !items.some((item) => item.ambiguous === true)) {
+\t\ttry {
+\t\t\tconst final = await registry.deliverPayloads(staging.sessionKey, [{ text: "Done." }], {
+\t\t\t\tguestQueryId: staging.guestQueryId, runId: staging.runId, kind: "message-media-final",
+\t\t\t\tassertCurrent: () => { throwIfAborted(ctx.abortSignal); ctx.input.assertDirectAdapterHandoff?.(); }
+\t\t\t});
+\t\t\tif (!final?.delivered) log.warn(\`[hotfix][guest-media-staging] terminal cleanup not confirmed: \${final?.reason ?? "no receipt"}\`);
+\t\t} catch (err) {
+\t\t\tlog.warn(\`[hotfix][guest-media-staging] terminal cleanup failed after media delivery: \${formatErrorMessage(err)}\`);
+\t\t}
+\t}
 \tconst failed = items.filter((item) => !item.delivered).map((item) => \`\${item.fileName}: \${item.reason}\`);
 \tconst note = delivered
 \t\t? \`Guest delivery: \${items.filter((i) => i.delivered).length} attachment(s) inserted into the guest's inline message (a copy stays in the operator's staging chat).\${failed.length ? \` Not attached: \${failed.join("; ")}.\` : ""} Do not resend; mention the attachment briefly in your final text.\`
