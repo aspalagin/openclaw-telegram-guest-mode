@@ -12,6 +12,7 @@ const targets = {
  'delivery-result': ['function buildDeliveryResult('],
  'delivery-evidence': ['function getAutomaticDeliveryEvidence('],
  'announce-delivery': ['function createDirectAnnounceResponseClassifier('],
+ 'child-followup': ['async function dispatchSessionsSendFollowup(params, replyContext, options) {'],
 };
 const source = name => corpus.read(corpus.findOne(name, targets[name]));
 let pass=0,fail=0, networkCalls=0;

@@ -1,11 +1,11 @@
-# Current port: 1.5.2 / OpenClaw 2026.10.9 and 2026.11.1
+# Current port: 1.5.3 / OpenClaw 2026.10.9 and 2026.11.1
 
 The current kit supports 2026.10.9 and 2026.11.1. Earlier builds discussed below are
 historical. Content locators/assertions follow the new ingress, reply-deliverer,
 follow-up, command-delivery and spawn layouts. Upstream allowed updates,
 owner-context forwarding and Ultrafast value normalization need no old patches.
 
-Original query ownership follows admission, actual runs, spawn, announce and
+Original query ownership follows admission, actual runs, spawn, child followup, announce and
 settle. Collection/overflow/dedupe preserve ownership. Public grammy/apiRoot,
 portable rules paths and no-default-staging behavior remain. R2 adds captured
 media roots, serialized attachment-preserving edits and per-payload receipts.
@@ -16,6 +16,12 @@ Verification: syntax, disposable pristine-package apply/check, repeat apply and
 dry-run, and bounded network-free regressions. No live Telegram E2E or restart
 recovery is claimed. Bindings/receipts remain process-local; missing ownership
 and pre-frozen mixed-query cohorts fail closed. No new authority or persistence.
+
+`guest-query-ownership-child-followup` binds the accepted `sessions_send` run ID
+to the calling turn before `registerSubagentRun` can publish a completion. The
+previously finished child's query is not reused. Existing-run steering retains
+its original owner. Tests execute the bundled dispatcher with mocked admission
+and the real guest registry, including a newer query arriving before delivery.
 
 ## 2026.11.1 changes
 

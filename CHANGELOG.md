@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.5.3 — 2026-11-12
+
+- Bind newly accepted `sessions_send` child followups to the calling guest turn
+  before publishing their completion ownership. Continuing a finished child now
+  allows the requester to wake and deliver the result to the correct inline reply.
+- Keep existing-run steering ownership unchanged; unknown or conflicting owners
+  still fail closed. A later guest query cannot capture the followup's result.
+- Exercise the actual followup dispatcher and guest registry on both supported
+  OpenClaw versions, including admission failure and ordinary non-guest callers.
+- Bindings remain process-local; this change does not recover pre-existing stuck
+  runs or guest replies across a gateway restart.
+
 ## 1.5.2 — 2026-11-08
 
 - Finalize the guest placeholder timer after a confirmed terminal media-only reply,
