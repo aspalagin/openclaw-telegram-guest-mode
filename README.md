@@ -2,7 +2,7 @@
 
 Portable patch layer that adds Telegram Bot API guest-query support
 (`supports_guest_queries` / `guest_message` / `answerGuestQuery`, Bot API 10.3)
-to OpenClaw. Version 1.5.3 supports OpenClaw `2026.10.9` and `2026.11.1`.
+to OpenClaw. Version 1.5.4 supports OpenClaw `2026.10.9`, `2026.11.1`, and `2026.11.3`.
 
 This repository is an operator patch, not an upstream OpenClaw release. It
 patches built `dist/*.mjs` bundles in an installed OpenClaw package, so review
@@ -66,9 +66,9 @@ it before running it on a production host.
   default on the `openai` provider, with an explicit `params.serviceTier`
   always taking precedence.
 
-## Version 1.5.0: OpenClaw 2026.11.1 compatibility
+## Supported OpenClaw versions
 
-This port supports **OpenClaw 2026.10.9 and 2026.11.1**. Both versions run in CI;
+This port supports **OpenClaw 2026.10.9, 2026.11.1, and 2026.11.3**. All three versions run in CI;
 other versions require a separate port review. On 11.1, guest restrictions cover
 both the turn and completion-session tool surfaces while upstream owner checks
 remain active. Session routing, follow-up ownership and optional Ultrafast use the
@@ -162,13 +162,13 @@ sudo systemctl restart openclaw-gateway
 ```
 
 Re-running apply reports unchanged with zero writes. Apply this kit to a pristine
-2026.10.9 or 2026.11.1 package after installing that OpenClaw release.
+2026.10.9, 2026.11.1, or 2026.11.3 package after installing that OpenClaw release.
 The optional silent-completion fallback guard reports not applicable on pristine
 builds. Guest allowed updates and owner-context forwarding are now upstream.
 
 > **This patches the installed dist.** Any OpenClaw update reverts the patched
 > bundles: re-run apply and check after every update. The anchors are pinned
-> to OpenClaw `2026.10.9` and `2026.11.1` (`TESTED_OPENCLAW_VERSIONS` in `lib/kit.mjs`). On any
+> to OpenClaw `2026.10.9`, `2026.11.1`, and `2026.11.3` (`TESTED_OPENCLAW_VERSIONS` in `lib/kit.mjs`). On any
 > other version the apply **refuses to run** (`status=refused`, nothing
 > written) unless `--allow-untested` is given; with the flag, unmatched anchors
 > still fail the whole run before anything is written, but matching anchors on
@@ -332,20 +332,24 @@ reinstall the pinned OpenClaw package. Disabling without rollback: set
 `"enabled": false` in the rules file (placeholder/edit/append/media off,
 single `answerGuestQuery` stays).
 
-## Combining the public hotfix kits on 2026.11.1
+## Combining the public hotfix kits on 2026.11.3 and 2026.11.1
 
-Apply rich-media first, threaded-mode second, and **guest-mode 1.5.1 or later last**.
+Apply rich-media first, threaded-mode second, and **guest-mode 1.5.4 last**.
 Guest-mode adds an extra file-ID recording hook when rich-media is present.
-From a directory containing the three repository checkouts:
+For OpenClaw 2026.11.3, from a directory containing the three repository checkouts:
 
 ```bash
-node openclaw-telegram-rich-media-hotfix/scripts/apply-2026-11-1.mjs --package-root /path/to/openclaw --backup-dir ./backups/rich
-node openclaw-threaded-mode-hotfix/scripts/apply-2026-11-1.mjs --package-root /path/to/openclaw --backup-dir ./backups/threaded
+node openclaw-telegram-rich-media-hotfix/scripts/apply-2026-11-3.mjs --package-root /path/to/openclaw --backup-dir ./backups/rich
+node openclaw-threaded-mode-hotfix/scripts/apply-2026-11-3.mjs --package-root /path/to/openclaw --backup-dir ./backups/threaded
 node openclaw-telegram-guest-mode/apply-guest-mode.mjs --package-root /path/to/openclaw --backup-dir ./backups/guest
-node openclaw-telegram-rich-media-hotfix/scripts/check-2026-11-1.mjs --package-root /path/to/openclaw
-node openclaw-threaded-mode-hotfix/scripts/check-2026-11-1.mjs --package-root /path/to/openclaw
+node openclaw-telegram-rich-media-hotfix/scripts/check-2026-11-3.mjs --package-root /path/to/openclaw
+node openclaw-threaded-mode-hotfix/scripts/check-2026-11-3.mjs --package-root /path/to/openclaw
 node openclaw-telegram-guest-mode/check-guest-mode.mjs --package-root /path/to/openclaw
 ```
+
+For OpenClaw 2026.11.1, use the rich/threaded `*-2026-11-1.mjs` scripts instead.
+The threaded 11.3 kit leaves DM-topic adoption disabled; review its compatibility
+notes before choosing an older threaded kit.
 
 If you add rich-media to an already patched guest-mode installation, repeat the
 last guest-mode apply and all three checks before restarting the gateway. Add
@@ -353,7 +357,7 @@ last guest-mode apply and all three checks before restarting the gateway. Add
 
 ## Focused offline regression
 
-After applying to either supported disposable package:
+After applying to any supported disposable package:
 
     npm run test:ownership -- /path/to/disposable-openclaw/dist
     npm run test:policy -- /path/to/disposable-openclaw/dist

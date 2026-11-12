@@ -1,6 +1,6 @@
-# Current port: 1.5.3 / OpenClaw 2026.10.9 and 2026.11.1
+# Current port: 1.5.4 / OpenClaw 2026.10.9, 2026.11.1, and 2026.11.3
 
-The current kit supports 2026.10.9 and 2026.11.1. Earlier builds discussed below are
+The current kit supports 2026.10.9, 2026.11.1, and 2026.11.3. Earlier builds discussed below are
 historical. Content locators/assertions follow the new ingress, reply-deliverer,
 follow-up, command-delivery and spawn layouts. Upstream allowed updates,
 owner-context forwarding and Ultrafast value normalization need no old patches.
@@ -23,6 +23,12 @@ previously finished child's query is not reused. Existing-run steering retains
 its original owner. Tests execute the bundled dispatcher with mocked admission
 and the real guest registry, including a newer query arriving before delivery.
 
+## 2026.11.3 changes
+
+The command-delivery template uses the declared upstream output helper:
+`printPayload` on 11.3, `logPayload` on 10.9/11.1. Guest ownership, per-item
+receipts and the private `sessions_send` completion exclusion are unchanged.
+
 ## 2026.11.1 changes
 
 - Guest tool denial stays in the shared policy filter for both turn and session
@@ -34,7 +40,7 @@ and the real guest registry, including a newer query arriving before delivery.
 - Owner child dispatch remains inside upstream's source-execution scope wrapper.
 - Optional Ultrafast resolves the actual imported logger alias on each baseline.
 
-The CI matrix applies the kit and optional set to both pristine npm tarballs,
+The CI matrix applies the kit and optional set to all three pristine npm tarballs,
 checks a non-writing dry run and idempotent reapply, and executes mocked ownership,
 policy and Ultrafast regressions. No live transport or server configuration is used.
 
