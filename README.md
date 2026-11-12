@@ -2,7 +2,7 @@
 
 Portable patch layer that adds Telegram Bot API guest-query support
 (`supports_guest_queries` / `guest_message` / `answerGuestQuery`, Bot API 10.3)
-to OpenClaw. Version 1.5.2 supports OpenClaw `2026.10.9` and `2026.11.1`.
+to OpenClaw. Version 1.5.3 supports OpenClaw `2026.10.9` and `2026.11.1`.
 
 This repository is an operator patch, not an upstream OpenClaw release. It
 patches built `dist/*.mjs` bundles in an installed OpenClaw package, so review

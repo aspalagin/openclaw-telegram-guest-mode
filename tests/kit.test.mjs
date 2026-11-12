@@ -37,7 +37,7 @@ try {
   const applied = JSON.parse(run("apply-guest-mode.mjs", [...args, "--backup-dir", tmp]));
   assert.equal(applied.status, "patched");
   assert.equal(JSON.parse(run("check-guest-mode.mjs", args)).ok, true);
-  for (const file of ["tests/guest-ownership.test.mjs", "tests/guest-policy.test.mjs", "tests/guest-ultrafast.test.mjs"]) console.log(run(file, [path.join(root, "dist")]).trim());
+  for (const file of ["tests/guest-ownership.test.mjs", "tests/guest-child-followup.test.mjs", "tests/guest-policy.test.mjs", "tests/guest-ultrafast.test.mjs"]) console.log(run(file, [path.join(root, "dist")]).trim());
   const after = digest();
   const repeated = JSON.parse(run("apply-guest-mode.mjs", [...args, "--backup-dir", tmp]));
   assert.equal(repeated.status, "unchanged");
