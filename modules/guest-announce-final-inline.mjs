@@ -1,4 +1,4 @@
-// Portable OpenClaw 2026.10.9: guest-announce-final-inline.
+// Portable OpenClaw 2026.10.9 / 2026.11.1 / 2026.11.3: guest-announce-final-inline.
 import fs from "node:fs";
 import path from "node:path";
 import { replaceOnce, insertAfter, contains, notContains } from "../lib/patch-helpers.mjs";
@@ -69,18 +69,27 @@ const EMPTY_ANCHOR = "\tif (deliveryPayloads.length === 0) {\n";
 const emptyDiag = (runCond, tag) => `\t\tif (typeof effectiveSessionKey === "string" && effectiveSessionKey.includes(":guest:") && ${runCond}) runtime.log(\`[hotfix][guest-announce-final] guest-session announce final has no visible payload — nothing to append (session=\${effectiveSessionKey} run=\${opts.runId} deliver=\${deliveryRequested}\${deliver !== deliveryRequested ? "(message_tool_only)" : ""} suppressed=\${replyNormalization.kind === "suppress" ? replyNormalization.reason ?? "?" : "no"})\`); // ${MARK} ${tag}\n`;
 const EMPTY_DIAG_V2 = emptyDiag(RUN_IS_ANNOUNCE_V2, "v2 (diag)");
 const EMPTY_DIAG = emptyDiag(RUN_IS_GUEST_ANNOUNCE, `v3 (diag; ${SESSIONS_SEND_COMPLETION_PREFIX} excluded)`);
+// OpenClaw 2026.11.3 renamed the local output helper. Adapt only our templates;
+// existing declaration/order assertions still require the matching upstream helper.
+function payloadTemplate(template, source) {
+  return source.includes("const printPayload = (payload) => {")
+    ? template.replaceAll("logPayload", "printPayload") : template;
+}
 export function patch(source) {
+  const [anchor, block, previousBlock, blockV1, blockV2] =
+    [ANCHOR_OLD, GUEST_BLOCK, GUEST_BLOCK_PREVIOUS, GUEST_BLOCK_V1, GUEST_BLOCK_V2]
+      .map(template => payloadTemplate(template, source));
   let next = source;
   if (!next.includes("receiptPayloads = normalizedPayloads")) {
     next = replaceOnce(next, "const completeDelivery = (status, deliverySucceeded) => {", "const completeDelivery = (status, deliverySucceeded, receiptPayloads = normalizedPayloads) => {", label);
     next = replaceOnce(next, "payloads: [...normalizedPayloads],", "payloads: [...receiptPayloads],", label);
     next = replaceOnce(next, "payloads: normalizedPayloads,", "payloads: receiptPayloads,", label);
   }
-  if (next.includes(GUEST_BLOCK_PREVIOUS)) next = replaceOnce(next, GUEST_BLOCK_PREVIOUS, GUEST_BLOCK, "query-bound payload completion upgrade");
-  if (!next.includes(GUEST_BLOCK)) {
-    if (next.includes(GUEST_BLOCK_V2)) next = replaceOnce(next, GUEST_BLOCK_V2, GUEST_BLOCK, "guest guard v2 → v3 (announce:sessions-send excluded) in deliverAgentCommandResult");
-    else if (next.includes(`${ANCHOR_OLD}${GUEST_BLOCK_V1}`)) next = replaceOnce(next, `${ANCHOR_OLD}${GUEST_BLOCK_V1}`, `${GUEST_BLOCK}${ANCHOR_OLD}`, "guest guard v1 → v3 (before `if (!deliver)`) in deliverAgentCommandResult");
-    else next = replaceOnce(next, ANCHOR_OLD, `${GUEST_BLOCK}${ANCHOR_OLD}`, "guest guard before `if (!deliver)` in deliverAgentCommandResult");
+  if (next.includes(previousBlock)) next = replaceOnce(next, previousBlock, block, "query-bound payload completion upgrade");
+  if (!next.includes(block)) {
+    if (next.includes(blockV2)) next = replaceOnce(next, blockV2, block, "guest guard v2 → v3 (announce:sessions-send excluded) in deliverAgentCommandResult");
+    else if (next.includes(`${anchor}${blockV1}`)) next = replaceOnce(next, `${anchor}${blockV1}`, `${block}${anchor}`, "guest guard v1 → v3 (before `if (!deliver)`) in deliverAgentCommandResult");
+    else next = replaceOnce(next, anchor, `${block}${anchor}`, "guest guard before `if (!deliver)` in deliverAgentCommandResult");
   }
   if (!next.includes(EMPTY_DIAG)) {
     if (next.includes(EMPTY_DIAG_V2)) next = replaceOnce(next, EMPTY_DIAG_V2, EMPTY_DIAG, "guest announce no-payload diagnostic v2 → v3 in deliverAgentCommandResult");
@@ -122,13 +131,13 @@ const count = (s, n) => s.split(n).length - 1;
 export const check = { gate: "required", assertions: [
   contains(`${MARK} v2`, "маркер guest-announce-final-inline v2"),
   contains(`${MARK} v3`, "маркер guest-announce-final-inline v3 (исключение announce:sessions-send)"),
-  contains(GUEST_BLOCK, "guest-ветка v3 deliverAgentCommandResult целиком"),
+  (c) => contains(payloadTemplate(GUEST_BLOCK, c), "guest-ветка v3 deliverAgentCommandResult целиком")(c),
   contains(EMPTY_DIAG, "диагностика пустого payload announce-хода гостя (v3)"),
-  notContains(GUEST_BLOCK_V2, "остаток guest-ветки v2 (announce:sessions-send:…:completion попадал бы в inline гостя)"),
+  (c) => notContains(payloadTemplate(GUEST_BLOCK_V2, c), "остаток guest-ветки v2 (announce:sessions-send:…:completion попадал бы в inline гостя)")(c),
   notContains(EMPTY_DIAG_V2, "остаток диагностики v2 (без исключения announce:sessions-send)"),
   contains("[hotfix][guest-announce-final] dropping guest-session final", "диагностика дропа"),
-  notContains(GUEST_BLOCK_V1, "остаток guest-ветки v1 (после `if (!deliver)`)"),
-  contains(ANCHOR_OLD, "штатный `if (!deliver)` сохранён"),
+  (c) => notContains(payloadTemplate(GUEST_BLOCK_V1, c), "остаток guest-ветки v1 (после `if (!deliver)`)")(c),
+  (c) => contains(payloadTemplate(ANCHOR_OLD, c), "штатный `if (!deliver)` сохранён")(c),
   // идентификаторы, которыми пользуется ветка, должны существовать в функции
   contains("const effectiveSessionKey = outboundSession?.key ?? opts.sessionKey;", "effectiveSessionKey"),
   contains("const deliveryRequested = opts.deliver === true;", "deliveryRequested (10.5: opts.deliver === true)"),
@@ -138,7 +147,7 @@ export const check = { gate: "required", assertions: [
   contains("const completeDelivery = (status, deliverySucceeded, receiptPayloads = normalizedPayloads) => {", "completeDelivery(status, deliverySucceeded)"),
   contains("const { deliveryChannel, isDeliveryChannelKnown, defaultAccountId, resolvedAccountId, resolvedTarget, deliveryTarget, resolvedReplyToId, resolvedThreadTarget, deliveryPlugin } = deliveryRouting;", "deliveryChannel/deliveryTarget из deliveryRouting"),
   // порядок: объявление logPayload → guest-ветка v2 → `if (!deliver)` → первая платформенная отправка
-  (c) => { const fn = c.indexOf("async function deliverAgentCommandResult(params) {"); const lp = c.indexOf("const logPayload = (payload) => {", fn); const g = c.indexOf(`${MARK} v2 (2026-10-04)`, fn); const nd = c.indexOf(ANCHOR_OLD, fn); const send = c.indexOf("send = await sendDurableMessageBatchCore({", fn); return fn >= 0 && lp >= 0 && g > lp && nd > g && send > nd ? null : "guest-ветка v2 не между объявлением logPayload и `if (!deliver)` (или sendDurableMessageBatchCore раньше)"; },
+  (c) => { const fn = c.indexOf("async function deliverAgentCommandResult(params) {"); const lp = c.indexOf(payloadTemplate("const logPayload = (payload) => {", c), fn); const g = c.indexOf(`${MARK} v2 (2026-10-04)`, fn); const nd = c.indexOf(payloadTemplate(ANCHOR_OLD, c), fn); const send = c.indexOf("send = await sendDurableMessageBatchCore({", fn); return fn >= 0 && lp >= 0 && g > lp && nd > g && send > nd ? null : "guest-ветка v2 не между объявлением logPayload и `if (!deliver)` (или sendDurableMessageBatchCore раньше)"; },
   (c) => { const fn = c.indexOf("async function deliverAgentCommandResult(params) {"); const empty = c.indexOf(EMPTY_ANCHOR, fn); const diag = c.indexOf(EMPTY_DIAG, fn); return fn >= 0 && empty >= 0 && diag === empty + EMPTY_ANCHOR.length ? null : "диагностика пустого payload не первой строкой блока `if (deliveryPayloads.length === 0)`"; },
   (c) => count(c, "async function deliverAgentCommandResult(params) {") === 1 && count(c, "send = await sendDurableMessageBatchCore({") === 1 ? null : "deliverAgentCommandResult/sendDurableMessageBatchCore встречаются не по одному разу (новый путь отправки в обход guest-ветки?)",
   (c) => count(c, "deliverPayloads") === 1 ? null : "appendBySession вызывается не один раз",

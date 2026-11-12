@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.4 — 2026-11-12
+
+- Support OpenClaw 2026.11.3 while retaining 2026.10.9 and 2026.11.1.
+- Follow the upstream `printPayload` rename for command-delivery replies; preserve
+  guest ownership, delivery receipts and private completion boundaries.
+- Keep the reported kit version consistent with package metadata.
+- Run the existing offline compatibility checks on all three versions.
+
 ## 1.5.3 — 2026-11-12
 
 - Bind newly accepted `sessions_send` child followups to the calling guest turn
